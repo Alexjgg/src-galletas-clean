@@ -291,8 +291,8 @@ class InvoiceButtonFilter
         $school_id = $this->getOrderSchoolId($order);
         
         if (!$school_id) {
-            // Si no hay escuela asociada, no mostrar factura
-            return false;
+            // Si no hay escuela asociada, PERMITIR facturar
+            return true;
         }
 
         // Obtener configuración de facturación de la escuela
