@@ -107,11 +107,11 @@ class PaymentStatusColumn
         add_action('woocommerce_payment_complete', [$this, 'updateOrderSortValue'], 10, 1);
         add_action('save_post_shop_order', [$this, 'updateOrderSortValue'], 10, 1);
         
-        // TEMPORALMENTE DESACTIVADO - Causaba filtros duplicados
-        // add_action('restrict_manage_posts', [$this, 'addPaymentStatusFilters']);
-        // add_action('woocommerce_order_list_table_restrict_manage_orders', [$this, 'addPaymentStatusFiltersHPOS']);
-        // add_filter('parse_query', [$this, 'handlePaymentStatusFiltering']);
-        // add_filter('woocommerce_order_list_table_prepare_items_query_args', [$this, 'handlePaymentStatusFilteringHPOS']);
+        // Filtros habilitados para incluir refunds
+        add_action('restrict_manage_posts', [$this, 'addPaymentStatusFilters']);
+        add_action('woocommerce_order_list_table_restrict_manage_orders', [$this, 'addPaymentStatusFiltersHPOS']);
+        add_filter('parse_query', [$this, 'handlePaymentStatusFiltering']);
+        add_filter('woocommerce_order_list_table_prepare_items_query_args', [$this, 'handlePaymentStatusFilteringHPOS']);
         
         // CSS para ambos sistemas
         add_action('admin_head', [$this, 'addPaymentStatusColumnCSS']);
@@ -359,6 +359,9 @@ class PaymentStatusColumn
         echo '<option value="paid"' . selected($current_filter, 'paid', false) . '>✅ ' . __('Only paid', 'neve-child') . '</option>';
         echo '<option value="unpaid"' . selected($current_filter, 'unpaid', false) . '>⏳ ' . __('Pending payment', 'neve-child') . '</option>';
         echo '<option value="transfer"' . selected($current_filter, 'transfer', false) . '>🏦 ' . __('Pending Payment transfers', 'neve-child') . '</option>';
+        echo '<option value="refund"' . selected($current_filter, 'refund', false) . '>💰 ' . __('With refunds', 'neve-child') . '</option>';
+        echo '<option value="full_refund"' . selected($current_filter, 'full_refund', false) . '>🔴 ' . __('Full refunds', 'neve-child') . '</option>';
+        echo '<option value="partial_refund"' . selected($current_filter, 'partial_refund', false) . '>🟠 ' . __('Partial refunds', 'neve-child') . '</option>';
         echo '</select>';
     }
 
@@ -439,6 +442,9 @@ class PaymentStatusColumn
         echo '<option value="paid"' . selected($current_filter, 'paid', false) . '>✅ ' . __('Only paid', 'neve-child') . '</option>';
         echo '<option value="unpaid"' . selected($current_filter, 'unpaid', false) . '>⏳ ' . __('Pending payment', 'neve-child') . '</option>';
         echo '<option value="transfer"' . selected($current_filter, 'transfer', false) . '>🏦 ' . __('Pending Payment transfers', 'neve-child') . '</option>';
+        echo '<option value="refund"' . selected($current_filter, 'refund', false) . '>💰 ' . __('With refunds', 'neve-child') . '</option>';
+        echo '<option value="full_refund"' . selected($current_filter, 'full_refund', false) . '>🔴 ' . __('Full refunds', 'neve-child') . '</option>';
+        echo '<option value="partial_refund"' . selected($current_filter, 'partial_refund', false) . '>🟠 ' . __('Partial refunds', 'neve-child') . '</option>';
         echo '</select>';
     }
 
@@ -1188,6 +1194,21 @@ class PaymentStatusColumn
                 // Solo transferencias bancarias SIN pagar
                 $is_transfer = in_array($payment_method, ['bacs', 'transferencia']);
                 return $is_transfer && !$is_paid;
+                
+            case 'refund':
+                // Pedidos que tienen cualquier tipo de reembolso
+                $refund_status = $this->getRefundStatus($order);
+                return !empty($refund_status);
+                
+            case 'full_refund':
+                // Solo pedidos con reembolso completo
+                $refund_status = $this->getRefundStatus($order);
+                return $refund_status === 'full';
+                
+            case 'partial_refund':
+                // Solo pedidos con reembolso parcial
+                $refund_status = $this->getRefundStatus($order);
+                return $refund_status === 'partial';
                 
             default:
                 // Todos los pedidos (sin filtro)
