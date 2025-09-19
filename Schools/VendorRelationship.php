@@ -18,10 +18,11 @@ if (!defined('ABSPATH')) {
 class VendorRelationship
 {
     /**
-     * Post types
+     * Post types and taxonomies
      */
     private const SCHOOL_POST_TYPE = 'coo_school';
     private const VENDOR_POST_TYPE = 'coo_vendor';
+    private const ZONE_TAXONOMY = 'coo_zone';
 
     /**
      * Constructor
@@ -46,6 +47,10 @@ class VendorRelationship
         add_filter('manage_edit-' . self::SCHOOL_POST_TYPE . '_sortable_columns', [$this, 'makeVendorColumnSortable']);
         add_action('restrict_manage_posts', [$this, 'addVendorFilter']);
         add_filter('parse_query', [$this, 'filterSchoolsByVendor']);
+        
+        // Zone taxonomy filter
+        add_action('restrict_manage_posts', [$this, 'addZoneFilter']);
+        add_filter('parse_query', [$this, 'filterSchoolsByZone']);
     }
 
     /**
@@ -267,6 +272,33 @@ class VendorRelationship
     }
 
     /**
+     * Add zone taxonomy filter to schools list
+     * 
+     * @return void
+     */
+    public function addZoneFilter(): void
+    {
+        global $typenow;
+        
+        if ($typenow !== self::SCHOOL_POST_TYPE) {
+            return;
+        }
+
+        $zones = $this->getAllZones();
+        $selected_zone = $_GET['zone_filter'] ?? '';
+
+        echo '<select name="zone_filter">';
+        echo '<option value="">' . __('All zones', 'neve-child') . '</option>';
+        
+        foreach ($zones as $zone) {
+            $selected = selected($selected_zone, $zone->term_id, false);
+            echo '<option value="' . esc_attr($zone->term_id) . '" ' . $selected . '>' . esc_html($zone->name) . '</option>';
+        }
+        
+        echo '</select>';
+    }
+
+    /**
      * Filter schools by vendor
      * 
      * @param \WP_Query $query Query object
@@ -300,6 +332,40 @@ class VendorRelationship
     }
 
     /**
+     * Filter schools by zone taxonomy
+     * 
+     * @param \WP_Query $query Query object
+     * @return void
+     */
+    public function filterSchoolsByZone(\WP_Query $query): void
+    {
+        global $pagenow;
+        
+        if (!is_admin() || $pagenow !== 'edit.php') {
+            return;
+        }
+
+        if (!isset($_GET['post_type']) || $_GET['post_type'] !== self::SCHOOL_POST_TYPE) {
+            return;
+        }
+
+        if (!isset($_GET['zone_filter']) || empty($_GET['zone_filter'])) {
+            return;
+        }
+
+        $zone_id = (int) $_GET['zone_filter'];
+        
+        $tax_query = $query->get('tax_query') ?: [];
+        $tax_query[] = [
+            'taxonomy' => self::ZONE_TAXONOMY,
+            'field'    => 'term_id',
+            'terms'    => $zone_id,
+        ];
+        
+        $query->set('tax_query', $tax_query);
+    }
+
+    /**
      * Get all vendors
      * 
      * @return array
@@ -315,5 +381,26 @@ class VendorRelationship
         ]);
 
         return $vendors ?: [];
+    }
+
+    /**
+     * Get all zones from the coo_zone taxonomy
+     * 
+     * @return array
+     */
+    private function getAllZones(): array
+    {
+        $zones = get_terms([
+            'taxonomy' => self::ZONE_TAXONOMY,
+            'hide_empty' => false,
+            'orderby' => 'name',
+            'order' => 'ASC'
+        ]);
+
+        if (is_wp_error($zones)) {
+            return [];
+        }
+
+        return $zones ?: [];
     }
 }
