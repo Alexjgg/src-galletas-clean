@@ -114,36 +114,79 @@ class CheckoutBlocker
      */
     public function checkUnpaidOrders(): void
     {
-        // DEBUGGING: Log básico
+        // DEBUGGING: Log básico con información del usuario
+        $debug_log = ABSPATH . 'checkout-blocker-debug.log';
+        $user_id = get_current_user_id();
+        $current_url = isset($_SERVER['REQUEST_URI']) ? $_SERVER['REQUEST_URI'] : 'unknown';
+        
+        file_put_contents($debug_log, 
+            date('Y-m-d H:i:s') . " - INICIO VERIFICACIÓN CHECKOUT\n" .
+            "Usuario ID: {$user_id}\n" .
+            "URL actual: {$current_url}\n" .
+            "Es checkout: " . (is_checkout() ? 'SÍ' : 'NO') . "\n" .
+            "Es admin: " . (is_admin() ? 'SÍ' : 'NO') . "\n" .
+            "Es order-pay: " . (is_wc_endpoint_url('order-pay') ? 'SÍ' : 'NO') . "\n" .
+            "Es order-received: " . (is_wc_endpoint_url('order-received') ? 'SÍ' : 'NO') . "\n" .
+            "Usuario logueado: " . (is_user_logged_in() ? 'SÍ' : 'NO') . "\n\n", 
+            FILE_APPEND
+        );
         
         // Solo aplicar en la página de checkout, pero NO en order-received o order-pay
         if (!is_checkout() || is_admin() || is_wc_endpoint_url('order-pay') || is_wc_endpoint_url('order-received')) {
+            file_put_contents($debug_log, date('Y-m-d H:i:s') . " - SALIDA TEMPRANA: No es página de checkout válida\n\n", FILE_APPEND);
             return;
         }
 
         // Solo para usuarios logueados
         if (!is_user_logged_in()) {
+            file_put_contents($debug_log, date('Y-m-d H:i:s') . " - SALIDA TEMPRANA: Usuario no logueado\n\n", FILE_APPEND);
             return;
         }
 
-        $user_id = get_current_user_id();
         
         try {
             $unpaid_completed_orders = $this->getAllCompletedOrdersIfUnpaid($user_id);
             
             // DEBUGGING DETALLADO: Mostrar información de los pedidos completados sin pagar
+            file_put_contents($debug_log, 
+                date('Y-m-d H:i:s') . " - RESULTADOS DE VERIFICACIÓN:\n" .
+                "Pedidos completados sin pagar encontrados: " . count($unpaid_completed_orders) . "\n", 
+                FILE_APPEND
+            );
+            
             if (!empty($unpaid_completed_orders)) {
                 foreach ($unpaid_completed_orders as $order) {
-                    // Pedido completado sin pagar encontrado
+                    file_put_contents($debug_log, 
+                        "  → Pedido #" . $order->get_id() . " (" . $order->get_order_number() . ")\n" .
+                        "    Estado: " . $order->get_status() . "\n" .
+                        "    Método pago: " . $order->get_payment_method() . "\n" .
+                        "    Transaction ID: '" . $order->get_transaction_id() . "'\n" .
+                        "    Meta payment_date: '" . $order->get_meta('payment_date') . "'\n" .
+                        "    Meta _dm_pay_later_card_payment_date: '" . $order->get_meta('_dm_pay_later_card_payment_date') . "'\n" .
+                        "    Meta _order_marked_as_paid: '" . $order->get_meta('_order_marked_as_paid') . "'\n" .
+                        "    Meta _is_master_order: '" . $order->get_meta('_is_master_order') . "'\n" .
+                        "    Fecha creación: " . $order->get_date_created()->format('Y-m-d H:i:s') . "\n" .
+                        "    Total: " . $order->get_total() . "\n\n", 
+                        FILE_APPEND
+                    );
                 }
             }
 
             // Si hay pedidos completados sin pagar, bloquear acceso al checkout
             if (!empty($unpaid_completed_orders)) {
+                file_put_contents($debug_log, date('Y-m-d H:i:s') . " - BLOQUEANDO CHECKOUT: Redirigiendo al carrito\n\n", FILE_APPEND);
                 $this->redirectToCartWithNotice($unpaid_completed_orders);
+            } else {
+                file_put_contents($debug_log, date('Y-m-d H:i:s') . " - CHECKOUT PERMITIDO: No hay pedidos completados sin pagar\n\n", FILE_APPEND);
             }
         } catch (Exception $e) {
             // En caso de error, permitir el checkout para no bloquear al usuario
+            file_put_contents($debug_log, 
+                date('Y-m-d H:i:s') . " - ERROR EN VERIFICACIÓN: " . $e->getMessage() . "\n" .
+                "Archivo: " . $e->getFile() . "\n" .
+                "Línea: " . $e->getLine() . "\n\n", 
+                FILE_APPEND
+            );
             return;
         }
     }
@@ -254,6 +297,8 @@ class CheckoutBlocker
      */
     private function getAllCompletedOrdersIfUnpaid(int $user_id): array
     {
+        $debug_log = ABSPATH . 'checkout-blocker-debug.log';
+        
         // Obtener TODOS los pedidos completados del usuario (sin límite)
         $completed_orders = wc_get_orders([
             'customer_id' => $user_id,
@@ -263,26 +308,51 @@ class CheckoutBlocker
             'status' => ['completed'],
         ]);
 
+        file_put_contents($debug_log, 
+            date('Y-m-d H:i:s') . " - BÚSQUEDA DE PEDIDOS COMPLETADOS:\n" .
+            "Usuario ID: {$user_id}\n" .
+            "Pedidos completados encontrados: " . count($completed_orders) . "\n", 
+            FILE_APPEND
+        );
+
         // Si no hay pedidos completados, no hay nada que verificar
         if (empty($completed_orders)) {
+            file_put_contents($debug_log, date('Y-m-d H:i:s') . " - No hay pedidos completados\n\n", FILE_APPEND);
             return [];
         }
-
 
         $unpaid_completed_orders = [];
 
         // Verificar CADA pedido completado para ver si necesita pago
         foreach ($completed_orders as $order) {
-            if ($this->orderNeedsPaymentAdvanced($order)) {
+            $needs_payment = $this->orderNeedsPaymentAdvanced($order);
+            
+            file_put_contents($debug_log, 
+                "  → Analizando pedido #" . $order->get_id() . " (" . $order->get_order_number() . "):\n" .
+                "    Estado: " . $order->get_status() . "\n" .
+                "    Método pago: " . $order->get_payment_method() . "\n" .
+                "    ¿Necesita pago?: " . ($needs_payment ? 'SÍ' : 'NO') . "\n" .
+                "    Transaction ID: '" . $order->get_transaction_id() . "'\n" .
+                "    Meta payment_date: '" . $order->get_meta('payment_date') . "'\n" .
+                "    Meta _dm_pay_later_card_payment_date: '" . $order->get_meta('_dm_pay_later_card_payment_date') . "'\n" .
+                "    Meta _order_marked_as_paid: '" . $order->get_meta('_order_marked_as_paid') . "'\n" .
+                "    Meta _is_master_order: '" . $order->get_meta('_is_master_order') . "'\n",
+                FILE_APPEND
+            );
+            
+            if ($needs_payment) {
                 $unpaid_completed_orders[] = $order;
+                file_put_contents($debug_log, "    → AGREGADO a lista de pedidos sin pagar\n", FILE_APPEND);
+            } else {
+                file_put_contents($debug_log, "    → NO agregado: está pagado\n", FILE_APPEND);
             }
         }
 
-        if (!empty($unpaid_completed_orders)) {
-            foreach ($unpaid_completed_orders as $order) {
-                // Pedido completado sin pagar encontrado
-            }
-        }
+        file_put_contents($debug_log, 
+            "\n" . date('Y-m-d H:i:s') . " - RESUMEN FINAL:\n" .
+            "Total pedidos completados sin pagar: " . count($unpaid_completed_orders) . "\n\n",
+            FILE_APPEND
+        );
 
         return $unpaid_completed_orders;
     }
@@ -326,27 +396,71 @@ class CheckoutBlocker
      */
     private function orderNeedsPaymentAdvanced(\WC_Order $order): bool
     {
+        $debug_log = ABSPATH . 'checkout-blocker-debug.log';
+        $order_id = $order->get_id();
         $payment_method = $order->get_payment_method();
+        
+        file_put_contents($debug_log, 
+            "    ANÁLISIS DETALLADO DEL PEDIDO #$order_id:\n" .
+            "    Método de pago: $payment_method\n",
+            FILE_APPEND
+        );
         
         // Usar lógica unificada: verificar solo indicadores confiables de pago
         $payment_date = $order->get_meta('payment_date');
         $deferred_payment_date = $order->get_meta('_dm_pay_later_card_payment_date');
+        $marked_as_paid = $order->get_meta('_order_marked_as_paid');
+        
+        file_put_contents($debug_log, 
+            "    payment_date: '$payment_date'\n" .
+            "    _dm_pay_later_card_payment_date: '$deferred_payment_date'\n" .
+            "    _order_marked_as_paid: '$marked_as_paid'\n",
+            FILE_APPEND
+        );
         
         // Verificar transaction_id solo si no es auto-generado (no contiene "order")
         $transaction_id = $order->get_transaction_id();
         $reliable_transaction = !empty($transaction_id) && stripos($transaction_id, 'order') === false;
         
+        file_put_contents($debug_log, 
+            "    transaction_id: '$transaction_id'\n" .
+            "    ¿Transaction ID confiable?: " . ($reliable_transaction ? 'SÍ' : 'NO') . "\n",
+            FILE_APPEND
+        );
+        
+        // NUEVA LÓGICA: Verificar el meta _order_marked_as_paid
+        if ($marked_as_paid === 'yes' || $marked_as_paid === '1' || $marked_as_paid === 1) {
+            file_put_contents($debug_log, 
+                "    → RESULTADO: NO necesita pago (marcado como pagado manualmente)\n",
+                FILE_APPEND
+            );
+            return false;
+        }
+        
         // Si tiene indicadores confiables de pago, NO necesita pago
         if (!empty($payment_date) || !empty($deferred_payment_date) || $reliable_transaction) {
+            file_put_contents($debug_log, 
+                "    → RESULTADO: NO necesita pago (tiene indicadores confiables)\n",
+                FILE_APPEND
+            );
             return false;
         }
         
         // Verificación específica para transferencias bancarias
         if ($payment_method === 'bacs') {
-            return $this->bankTransferNeedsPayment($order);
+            $needs_payment = $this->bankTransferNeedsPayment($order);
+            file_put_contents($debug_log, 
+                "    → RESULTADO: " . ($needs_payment ? 'SÍ' : 'NO') . " necesita pago (transferencia bancaria)\n",
+                FILE_APPEND
+            );
+            return $needs_payment;
         }
 
         // Para otros métodos, sin indicadores confiables necesita pago
+        file_put_contents($debug_log, 
+            "    → RESULTADO: SÍ necesita pago (sin indicadores confiables de pago)\n",
+            FILE_APPEND
+        );
         return true;
     }
 
