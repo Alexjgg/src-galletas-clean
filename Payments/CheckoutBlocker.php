@@ -338,8 +338,8 @@ class CheckoutBlocker
                     FILE_APPEND
                 );
                 
-                // Lógica invertida: si the_billing_by_the_school = true, el colegio NO paga (padres pagan)
-                $school_pays = ($billing_field === false || $billing_field === '0' || $billing_field === 0);
+                // LÓGICA CORREGIDA: Si the_billing_by_the_school = true, el colegio SÍ paga
+                $school_pays = ($billing_field === true || $billing_field === '1' || $billing_field === 1);
                 
                 file_put_contents($debug_log, 
                     "    ¿billing_field === false?: " . ($billing_field === false ? 'SÍ' : 'NO') . "\n" .
@@ -370,7 +370,7 @@ class CheckoutBlocker
                     $should_check_order = true;
                     file_put_contents($debug_log, "    → VERIFICANDO: Centro paga y es pedido maestro\n", FILE_APPEND);
                 } else {
-                    file_put_contents($debug_log, "    → SALTANDO: Centro paga pero es pedido individual (se maneja via maestro)\n", FILE_APPEND);
+                    file_put_contents($debug_log, "    → SALTANDO: Centro paga pero es pedido individual (debe verificar pedido maestro #" . $order->get_meta('_master_order_id') . ")\n", FILE_APPEND);
                 }
             } else {
                 // Si los padres pagan, considerar pedidos individuales (no maestros)
@@ -378,11 +378,36 @@ class CheckoutBlocker
                     $should_check_order = true;
                     file_put_contents($debug_log, "    → VERIFICANDO: Padres pagan y es pedido individual\n", FILE_APPEND);
                 } else {
-                    file_put_contents($debug_log, "    → SALTANDO: Padres pagan pero es pedido maestro\n", FILE_APPEND);
+                    file_put_contents($debug_log, "    → SALTANDO: Padres pagan pero es pedido maestro (se verifican pedidos individuales)\n", FILE_APPEND);
                 }
             }
             
             if (!$should_check_order) {
+                // Si el centro paga pero estamos en un pedido individual,
+                // necesitamos verificar el estado del pedido maestro
+                if ($school_pays && !$is_master_order) {
+                    $master_order_id = $order->get_meta('_master_order_id');
+                    if ($master_order_id) {
+                        $master_order = wc_get_order($master_order_id);
+                        if ($master_order) {
+                            // Verificar el estado de pago del pedido maestro
+                            $master_needs_payment = $this->orderNeedsPaymentAdvanced($master_order);
+                            
+                            file_put_contents($debug_log, "    → VERIFICANDO PEDIDO MAESTRO #{$master_order_id}: ¿Necesita pago? " . ($master_needs_payment ? 'SÍ' : 'NO') . "\n", FILE_APPEND);
+                            
+                            if ($master_needs_payment) {
+                                $unpaid_completed_orders[] = $order;
+                                file_put_contents($debug_log, "    → PEDIDO BLOQUEADO: El pedido maestro #{$master_order_id} no está pagado\n", FILE_APPEND);
+                            } else {
+                                file_put_contents($debug_log, "    → PEDIDO PERMITIDO: El pedido maestro #{$master_order_id} está pagado\n", FILE_APPEND);
+                            }
+                        } else {
+                            file_put_contents($debug_log, "    → ERROR: No se pudo cargar el pedido maestro #{$master_order_id}\n", FILE_APPEND);
+                        }
+                    } else {
+                        file_put_contents($debug_log, "    → ERROR: Pedido individual sin _master_order_id\n", FILE_APPEND);
+                    }
+                }
                 continue; // Saltar este pedido
             }
             
@@ -507,7 +532,8 @@ class CheckoutBlocker
         if ($payment_method === 'bacs') {
             $needs_payment = $this->bankTransferNeedsPayment($order);
             file_put_contents($debug_log, 
-                "    → RESULTADO: " . ($needs_payment ? 'SÍ' : 'NO') . " necesita pago (transferencia bancaria)\n",
+                "    → RESULTADO: " . ($needs_payment ? 'SÍ' : 'NO') . " necesita pago (transferencia bancaria - " . 
+                ($needs_payment ? "SIN confirmar - DEBE BLOQUEAR" : "CONFIRMADA") . ")\n",
                 FILE_APPEND
             );
             return $needs_payment;
@@ -530,7 +556,18 @@ class CheckoutBlocker
      */
     private function bankTransferNeedsPayment(\WC_Order $order): bool
     {
+        $debug_log = ABSPATH . 'checkout-blocker-debug.log';
         $order_status = $order->get_status();
+        
+        // Verificar el meta _order_marked_as_paid primero
+        $marked_as_paid = $order->get_meta('_order_marked_as_paid');
+        if ($marked_as_paid === 'yes' || $marked_as_paid === '1' || $marked_as_paid === 1) {
+            file_put_contents($debug_log, 
+                "    BACS DEBUG: Marcado como pagado manualmente → NO necesita pago\n",
+                FILE_APPEND
+            );
+            return false; // Marcado como pagado manualmente
+        }
         
         // Usar misma lógica unificada que otras funciones
         $payment_date = $order->get_meta('payment_date');
@@ -540,23 +577,46 @@ class CheckoutBlocker
         $transaction_id = $order->get_transaction_id();
         $reliable_transaction = !empty($transaction_id) && stripos($transaction_id, 'order') === false;
 
+        file_put_contents($debug_log, 
+            "    BACS DEBUG: payment_date='$payment_date', deferred='$deferred_payment_date', transaction='$transaction_id', reliable=" . ($reliable_transaction ? 'SÍ' : 'NO') . "\n",
+            FILE_APPEND
+        );
+
         // Si tiene indicadores confiables de pago, NO necesita pago
         if (!empty($payment_date) || !empty($deferred_payment_date) || $reliable_transaction) {
+            file_put_contents($debug_log, 
+                "    BACS DEBUG: Tiene indicadores confiables → NO necesita pago\n",
+                FILE_APPEND
+            );
             return false;
         }
 
-        // Para transferencias completadas sin indicadores, SÍ necesita confirmación manual
+        // CORREGIDO: Para transferencias bancarias completadas SIN indicadores de pago,
+        // SÍ necesita confirmación manual - NO se puede asumir que están pagadas
         if ($order_status === 'completed') {
-            return true;
+            file_put_contents($debug_log, 
+                "    BACS DEBUG: Estado='completed' SIN indicadores → SÍ NECESITA PAGO (debe ser confirmado)\n",
+                FILE_APPEND
+            );
+            return true; // BLOQUEAR: transferencia completada sin confirmar pago
         }
 
         // Para estados que claramente indican pago pendiente
         if (in_array($order_status, ['pending', 'on-hold', 'failed'])) {
+            file_put_contents($debug_log, 
+                "    BACS DEBUG: Estado='$order_status' → SÍ necesita pago\n",
+                FILE_APPEND
+            );
             return true;
         }
 
         // Para processing, usar needs_payment estándar de WooCommerce
-        return $order->needs_payment();
+        $wc_needs_payment = $order->needs_payment();
+        file_put_contents($debug_log, 
+            "    BACS DEBUG: Estado='$order_status', WC needs_payment=" . ($wc_needs_payment ? 'SÍ' : 'NO') . "\n",
+            FILE_APPEND
+        );
+        return $wc_needs_payment;
     }
 
     /**
