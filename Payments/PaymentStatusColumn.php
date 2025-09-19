@@ -199,6 +199,13 @@ class PaymentStatusColumn
         // Verificar si se debe actualizar el método de pago por indicadores manuales
         $this->checkAndUpdatePaymentMethodForManualPayment($order);
         
+        // PRIMERO: Verificar si hay reembolsos
+        $refund_status = $this->getRefundStatus($order);
+        if ($refund_status !== null) {
+            echo $refund_status;
+            return;
+        }
+        
         $is_paid = $this->isOrderReallyPaid($order);
         $payment_method = $order->get_payment_method();
         $order_total = $order->get_formatted_order_total();
@@ -526,6 +533,35 @@ class PaymentStatusColumn
                 border-color: #c3c4c7;
             }
             
+            /* Estados de reembolso */
+            .payment-status-refund-full {
+                color: #d63638;
+                background: #fef2f2;
+                border-color: #dc2626;
+                font-weight: bold;
+                font-size: 11px;
+                padding: 4px 8px;
+                border-radius: 4px;
+                border: 1px solid;
+                display: inline-block;
+                cursor: help;
+                white-space: nowrap;
+            }
+            
+            .payment-status-refund-partial {
+                color: #d97706;
+                background: #fefbf3;
+                border-color: #f59e0b;
+                font-weight: bold;
+                font-size: 11px;
+                padding: 4px 8px;
+                border-radius: 4px;
+                border: 1px solid;
+                display: inline-block;
+                cursor: help;
+                white-space: nowrap;
+            }
+            
             /* Enlaces de pago */
             .payment-link {
                 color: inherit !important;
@@ -828,6 +864,54 @@ class PaymentStatusColumn
         ];
         
         return $payment_methods[$payment_method] ?? ucfirst(str_replace('_', ' ', $payment_method));
+    }
+
+    /**
+     * Obtener el estado de reembolso del pedido
+     * 
+     * @param \WC_Order $order Objeto de pedido
+     * @return string|null HTML del estado de reembolso o null si no hay reembolsos
+     */
+    private function getRefundStatus(\WC_Order $order): ?string
+    {
+        // Obtener todos los reembolsos del pedido
+        $refunds = $order->get_refunds();
+        
+        if (empty($refunds)) {
+            return null;
+        }
+        
+        // Calcular totales
+        $order_total = (float) $order->get_total();
+        $total_refunded = (float) $order->get_total_refunded();
+        
+        // Determinar si es reembolso completo o parcial
+        $is_full_refund = ($total_refunded >= $order_total);
+        
+        // Obtener información de los reembolsos
+        $refund_dates = array_map(function($refund) {
+            return $refund->get_date_created()->date('d/m/Y H:i');
+        }, $refunds);
+        
+        // Crear tooltip informativo
+        $tooltip = $is_full_refund ? __('Full refund', 'neve-child') : __('Partial refund', 'neve-child');
+        $tooltip .= " - " . __('Total refunded', 'neve-child') . ": " . wc_price($total_refunded);
+        $tooltip .= " " . __('of', 'neve-child') . " " . $order->get_formatted_order_total();
+        $tooltip .= " - " . __('Refunds', 'neve-child') . ": " . count($refunds);
+        $tooltip .= " - " . __('Last refund', 'neve-child') . ": " . end($refund_dates);
+        
+        // Determinar clase CSS y texto
+        if ($is_full_refund) {
+            $css_class = 'payment-status-refund-full';
+            $icon = '↩️';
+            $text = __('FULL REFUND', 'neve-child');
+        } else {
+            $css_class = 'payment-status-refund-partial';
+            $icon = '↩️';
+            $text = __('PARTIAL REFUND', 'neve-child');
+        }
+        
+        return '<span class="' . $css_class . '" title="' . esc_attr($tooltip) . '">' . $icon . ' ' . $text . '</span>';
     }
 
     /**
