@@ -328,8 +328,26 @@ class CheckoutBlocker
             $school_pays = false;
             if ($order_school_id) {
                 $billing_field = get_field(\SchoolManagement\Shared\Constants::ACF_FIELD_SCHOOL_BILLING, $order_school_id);
+                
+                // DEBUG: Mostrar valores exactos del campo ACF
+                file_put_contents($debug_log, 
+                    "    DEBUGGING ACF FIELD:\n" .
+                    "    Campo ACF: " . \SchoolManagement\Shared\Constants::ACF_FIELD_SCHOOL_BILLING . "\n" .
+                    "    Valor devuelto: '" . var_export($billing_field, true) . "'\n" .
+                    "    Tipo de valor: " . gettype($billing_field) . "\n",
+                    FILE_APPEND
+                );
+                
                 // Lógica invertida: si the_billing_by_the_school = true, el colegio NO paga (padres pagan)
                 $school_pays = ($billing_field === false || $billing_field === '0' || $billing_field === 0);
+                
+                file_put_contents($debug_log, 
+                    "    ¿billing_field === false?: " . ($billing_field === false ? 'SÍ' : 'NO') . "\n" .
+                    "    ¿billing_field === '0'?: " . ($billing_field === '0' ? 'SÍ' : 'NO') . "\n" .
+                    "    ¿billing_field === 0?: " . ($billing_field === 0 ? 'SÍ' : 'NO') . "\n" .
+                    "    Resultado final school_pays: " . ($school_pays ? 'SÍ' : 'NO') . "\n",
+                    FILE_APPEND
+                );
             }
             
             file_put_contents($debug_log, 
