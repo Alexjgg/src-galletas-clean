@@ -89,11 +89,6 @@ class CheckoutBlocker
      */
     public function __construct() {
         // Verificar si está desactivado temporalmente para debugging
-        // if (file_exists(ABSPATH . 'wp-content/DISABLE_CHECKOUT_BLOCKER')) {
-        //     // Archivo de desactivación temporal encontrado - no registrar hooks
-        //     return;
-        // }
-        
         // Hooks principales
         add_action('template_redirect', [$this, 'checkUnpaidOrders']);
         add_action('woocommerce_thankyou', [$this, 'clearCartAfterPayment']);
@@ -325,18 +320,62 @@ class CheckoutBlocker
 
         // Verificar CADA pedido completado para ver si necesita pago
         foreach ($completed_orders as $order) {
-            $needs_payment = $this->orderNeedsPaymentAdvanced($order);
+            $is_master_order = $order->get_meta('_is_master_order') === 'yes';
+            $is_child_order = !empty($order->get_meta('_master_order_id'));
+            $order_school_id = $order->get_meta(\SchoolManagement\Shared\Constants::ORDER_META_SCHOOL_ID);
+            
+            // Determinar si el centro paga
+            $school_pays = false;
+            if ($order_school_id) {
+                $billing_field = get_field(\SchoolManagement\Shared\Constants::ACF_FIELD_SCHOOL_BILLING, $order_school_id);
+                // Lógica invertida: si the_billing_by_the_school = true, el colegio NO paga (padres pagan)
+                $school_pays = ($billing_field === false || $billing_field === '0' || $billing_field === 0);
+            }
             
             file_put_contents($debug_log, 
                 "  → Analizando pedido #" . $order->get_id() . " (" . $order->get_order_number() . "):\n" .
                 "    Estado: " . $order->get_status() . "\n" .
                 "    Método pago: " . $order->get_payment_method() . "\n" .
+                "    Es pedido maestro: " . ($is_master_order ? 'SÍ' : 'NO') . "\n" .
+                "    Es pedido hijo: " . ($is_child_order ? 'SÍ' : 'NO') . "\n" .
+                "    ID del colegio: $order_school_id\n" .
+                "    ¿El centro paga?: " . ($school_pays ? 'SÍ' : 'NO') . "\n",
+                FILE_APPEND
+            );
+            
+            // NUEVA LÓGICA: Filtrar según quién paga
+            $should_check_order = false;
+            
+            if ($school_pays) {
+                // Si el centro paga, solo considerar pedidos maestros
+                if ($is_master_order) {
+                    $should_check_order = true;
+                    file_put_contents($debug_log, "    → VERIFICANDO: Centro paga y es pedido maestro\n", FILE_APPEND);
+                } else {
+                    file_put_contents($debug_log, "    → SALTANDO: Centro paga pero es pedido individual (se maneja via maestro)\n", FILE_APPEND);
+                }
+            } else {
+                // Si los padres pagan, considerar pedidos individuales (no maestros)
+                if (!$is_master_order) {
+                    $should_check_order = true;
+                    file_put_contents($debug_log, "    → VERIFICANDO: Padres pagan y es pedido individual\n", FILE_APPEND);
+                } else {
+                    file_put_contents($debug_log, "    → SALTANDO: Padres pagan pero es pedido maestro\n", FILE_APPEND);
+                }
+            }
+            
+            if (!$should_check_order) {
+                continue; // Saltar este pedido
+            }
+            
+            $needs_payment = $this->orderNeedsPaymentAdvanced($order);
+            
+            file_put_contents($debug_log, 
                 "    ¿Necesita pago?: " . ($needs_payment ? 'SÍ' : 'NO') . "\n" .
                 "    Transaction ID: '" . $order->get_transaction_id() . "'\n" .
                 "    Meta payment_date: '" . $order->get_meta('payment_date') . "'\n" .
                 "    Meta _dm_pay_later_card_payment_date: '" . $order->get_meta('_dm_pay_later_card_payment_date') . "'\n" .
-                "    Meta _order_marked_as_paid: '" . $order->get_meta('_order_marked_as_paid') . "'\n" .
-                "    Meta _is_master_order: '" . $order->get_meta('_is_master_order') . "'\n",
+                "    Meta _order_marked_as_paid: '" . $order->get_meta('_order_marked_as_paid') . "'\n",
                 FILE_APPEND
             );
             
