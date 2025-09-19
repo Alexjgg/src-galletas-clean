@@ -179,6 +179,10 @@ class SchoolManagementBootstrap {
                     'dependencies' => ['SchoolManagement\Payments\PaymentStatusColumn'],
                     'store_global' => 'bank_transfer_bulk_actions_instance'
                 ],
+                'SchoolManagement\Payments\RefundRestrictions' => [
+                    'dependencies' => ['SchoolManagement\Payments\PaymentStatusColumn'],
+                    'store_global' => 'refund_restrictions_instance'
+                ],
                 'SchoolManagement\Payments\VendorPaymentGatewaySelector' => [
                     'store_global' => 'vendor_payment_gateway_selector_instance'
                 ],
