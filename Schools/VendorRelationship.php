@@ -316,19 +316,36 @@ class VendorRelationship
             return;
         }
 
-        if (!isset($_GET['vendor_filter']) || empty($_GET['vendor_filter'])) {
+        if (!isset($_GET['vendor_filter']) || empty($_GET['vendor_filter']) || $_GET['vendor_filter'] === '') {
+            return;
+        }
+
+        // Verificar que es la query principal del admin
+        if (!$query->is_main_query()) {
             return;
         }
 
         $vendor_id = (int) $_GET['vendor_filter'];
         
-        $query->set('meta_query', [
-            [
-                'key' => 'vendor',
-                'value' => $vendor_id,
-                'compare' => '='
-            ]
-        ]);
+        // Obtener meta_query existente si existe
+        $existing_meta_query = $query->get('meta_query', []);
+        
+        // Agregar el filtro de vendor
+        $vendor_meta_query = [
+            'key' => 'vendor',
+            'value' => $vendor_id,
+            'compare' => '='
+        ];
+        
+        // Si ya hay meta_query, agregarlo con relación AND
+        if (!empty($existing_meta_query)) {
+            $existing_meta_query[] = $vendor_meta_query;
+            $existing_meta_query['relation'] = 'AND';
+        } else {
+            $existing_meta_query = [$vendor_meta_query];
+        }
+        
+        $query->set('meta_query', $existing_meta_query);
     }
 
     /**
@@ -349,20 +366,44 @@ class VendorRelationship
             return;
         }
 
-        if (!isset($_GET['zone_filter']) || empty($_GET['zone_filter'])) {
+        if (!isset($_GET['zone_filter']) || empty($_GET['zone_filter']) || $_GET['zone_filter'] === '') {
+            return;
+        }
+
+        // Verificar que es la query principal del admin
+        if (!$query->is_main_query()) {
             return;
         }
 
         $zone_id = (int) $_GET['zone_filter'];
         
-        $tax_query = $query->get('tax_query') ?: [];
-        $tax_query[] = [
+        // Si ya hay una meta_query del vendor, mantenerla
+        $existing_meta_query = $query->get('meta_query', []);
+        
+        // Obtener tax_query existente si existe
+        $existing_tax_query = $query->get('tax_query', []);
+        
+        // Agregar el filtro de zona
+        $zone_tax_query = [
             'taxonomy' => self::ZONE_TAXONOMY,
             'field'    => 'term_id',
             'terms'    => $zone_id,
         ];
         
-        $query->set('tax_query', $tax_query);
+        // Si ya hay tax_query, agregarlo con relación AND
+        if (!empty($existing_tax_query)) {
+            $existing_tax_query[] = $zone_tax_query;
+            $existing_tax_query['relation'] = 'AND';
+        } else {
+            $existing_tax_query = [$zone_tax_query];
+        }
+        
+        $query->set('tax_query', $existing_tax_query);
+        
+        // Mantener la meta_query si existe (para el filtro de vendor)
+        if (!empty($existing_meta_query)) {
+            $query->set('meta_query', $existing_meta_query);
+        }
     }
 
     /**
