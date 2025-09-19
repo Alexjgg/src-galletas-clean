@@ -383,12 +383,15 @@ class PaymentHandler
     /**
      * Habilitar pago para pedidos de pago posterior
      * 
-     * @param bool $needs_payment Estado actual de necesita pago
+     * @param bool|null $needs_payment Estado actual de necesita pago
      * @param \WC_Order $order Objeto de pedido
      * @return bool Estado modificado de necesita pago
      */
-    public function enablePaymentForPayLater(bool $needs_payment, \WC_Order $order): bool
+    public function enablePaymentForPayLater(?bool $needs_payment, \WC_Order $order): bool
     {
+        // Si viene null, convertir a false como valor por defecto
+        $needs_payment = $needs_payment ?? false;
+        
         if ($order->get_status() === 'pay-later') {
             return true;
         }
