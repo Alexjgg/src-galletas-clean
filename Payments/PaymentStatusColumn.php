@@ -360,8 +360,6 @@ class PaymentStatusColumn
         echo '<option value="unpaid"' . selected($current_filter, 'unpaid', false) . '>⏳ ' . __('Pending payment', 'neve-child') . '</option>';
         echo '<option value="transfer"' . selected($current_filter, 'transfer', false) . '>🏦 ' . __('Pending Payment transfers', 'neve-child') . '</option>';
         echo '<option value="refund"' . selected($current_filter, 'refund', false) . '>💰 ' . __('With refunds', 'neve-child') . '</option>';
-        echo '<option value="full_refund"' . selected($current_filter, 'full_refund', false) . '>🔴 ' . __('Full refunds', 'neve-child') . '</option>';
-        echo '<option value="partial_refund"' . selected($current_filter, 'partial_refund', false) . '>🟠 ' . __('Partial refunds', 'neve-child') . '</option>';
         echo '</select>';
     }
 
@@ -443,8 +441,6 @@ class PaymentStatusColumn
         echo '<option value="unpaid"' . selected($current_filter, 'unpaid', false) . '>⏳ ' . __('Pending payment', 'neve-child') . '</option>';
         echo '<option value="transfer"' . selected($current_filter, 'transfer', false) . '>🏦 ' . __('Pending Payment transfers', 'neve-child') . '</option>';
         echo '<option value="refund"' . selected($current_filter, 'refund', false) . '>💰 ' . __('With refunds', 'neve-child') . '</option>';
-        echo '<option value="full_refund"' . selected($current_filter, 'full_refund', false) . '>🔴 ' . __('Full refunds', 'neve-child') . '</option>';
-        echo '<option value="partial_refund"' . selected($current_filter, 'partial_refund', false) . '>🟠 ' . __('Partial refunds', 'neve-child') . '</option>';
         echo '</select>';
     }
 
@@ -1196,19 +1192,9 @@ class PaymentStatusColumn
                 return $is_transfer && !$is_paid;
                 
             case 'refund':
-                // Pedidos que tienen cualquier tipo de reembolso
+                // Pedidos que tienen cualquier tipo de reembolso (completo o parcial)
                 $refund_status = $this->getRefundStatus($order);
                 return !empty($refund_status);
-                
-            case 'full_refund':
-                // Solo pedidos con reembolso completo
-                $refund_status = $this->getRefundStatus($order);
-                return $refund_status === 'full';
-                
-            case 'partial_refund':
-                // Solo pedidos con reembolso parcial
-                $refund_status = $this->getRefundStatus($order);
-                return $refund_status === 'partial';
                 
             default:
                 // Todos los pedidos (sin filtro)
