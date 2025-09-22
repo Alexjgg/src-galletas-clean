@@ -290,35 +290,46 @@ class InvoiceButtonFilter
      */
     private function shouldShowInvoiceButton(\WC_Order $order): bool
     {
-        // Obtener ID de la escuela desde la orden
-        $school_id = $this->getOrderSchoolId($order);
+        // REGLA 1: Si es orden maestra, solo mostrar si el centro paga
+        if ($this->isMasterOrder($order)) {
+            $school_id = $this->getOrderSchoolId($order);
+            if (!$school_id) {
+                return true; // Si no hay escuela, permitir
+            }
+            
+            // Para master orders: solo si el centro SÍ paga (facturación centralizada)
+            return $this->doesSchoolPay($school_id);
+        }
         
+        // REGLA 2: Para pedidos individuales (con o sin master), solo si el centro NO paga
+        $school_id = $this->getOrderSchoolId($order);
         if (!$school_id) {
-            // Si no hay escuela asociada, PERMITIR facturar
+            // Si no hay escuela asociada, SIEMPRE permitir facturar
             return true;
         }
 
-        // Obtener configuración de facturación de la escuela
-        $school_billing_enabled = $this->getSchoolBillingConfig($school_id);
-        
-        // Determinar si es orden maestra O si es una orden hija
-        $is_master_order = $this->isMasterOrder($order);
-        $is_child_order = $this->isChildOrder($order);
-        
-        // Aplicar reglas de negocio CORREGIDAS:
-        // 1. Orden maestra: Solo facturar si el instituto SÍ paga (facturación centralizada)
-        // 2. Orden individual/hija: Solo facturar si el instituto NO paga (pagos individuales por padres)
-        
-        if ($is_master_order) {
-            // Orden maestra: Solo facturar si el instituto paga (facturación centralizada)
-            $should_show = $school_billing_enabled;
-        } else {
-            // Orden individual o hija: SIEMPRE facturar si el instituto NO paga
-            // (Los padres pagan individualmente, independientemente de si hay master order)
-            $should_show = !$school_billing_enabled;
-        }
+        // Para pedidos individuales: solo si el centro NO paga (padres pagan individualmente)
+        return !$this->doesSchoolPay($school_id);
+    }
 
-        return $should_show;
+    /**
+     * Verificar si el centro/escuela paga directamente
+     * 
+     * @param int $school_id ID de la escuela
+     * @return bool True si el centro paga, False si pagan los padres
+     */
+    private function doesSchoolPay(int $school_id): bool
+    {
+        // Obtener el valor del campo ACF 'the_billing_by_the_school'
+        $billing_value = get_field(\SchoolManagement\Shared\Constants::ACF_FIELD_SCHOOL_BILLING, $school_id);
+        
+        // INTERPRETACIÓN CORREGIDA:
+        // the_billing_by_the_school = true  → El centro NO paga (los padres pagan individualmente)
+        // the_billing_by_the_school = false → El centro SÍ paga (facturación centralizada)
+        $field_is_true = ($billing_value === '1' || $billing_value === 1 || $billing_value === true);
+        
+        // Invertir porque el campo está al revés
+        return !$field_is_true;
     }
 
     /**
@@ -329,28 +340,8 @@ class InvoiceButtonFilter
      */
     private function getOrderSchoolId(\WC_Order $order): ?int
     {
-    $school_id = $order->get_meta(\SchoolManagement\Shared\Constants::ORDER_META_SCHOOL_ID);
+        $school_id = $order->get_meta(\SchoolManagement\Shared\Constants::ORDER_META_SCHOOL_ID);
         return $school_id ? (int) $school_id : null;
-    }
-
-    /**
-     * Obtener configuración de facturación de la escuela
-     * 
-     * @param int $school_id ID de la escuela
-     * @return bool Si la escuela tiene facturación habilitada
-     */
-    private function getSchoolBillingConfig(int $school_id): bool
-    {
-        // Obtener el valor del campo ACF 'the_billing_by_the_school'
-        $billing_value = get_field(\SchoolManagement\Shared\Constants::ACF_FIELD_SCHOOL_BILLING, $school_id);
-        
-        // LÓGICA CORREGIDA: Invertir la interpretación del campo
-        // Si the_billing_by_the_school = true, significa que el colegio NO paga (los padres pagan)
-        // Si the_billing_by_the_school = false, significa que el colegio SÍ paga (facturación centralizada)
-        $field_value = ($billing_value === '1' || $billing_value === 1 || $billing_value === true);
-        
-        // Retornar el valor invertido para que represente correctamente si el colegio paga
-        return !$field_value;
     }
 
     /**
