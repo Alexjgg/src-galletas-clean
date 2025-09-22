@@ -302,19 +302,16 @@ class InvoiceButtonFilter
         $is_master_order = $this->isMasterOrder($order);
         $is_child_order = $this->isChildOrder($order);
         
-        // Aplicar reglas de negocio SIMPLES:
-        // Si master puede facturar → hijas NO pueden
-        // Si master NO puede facturar → hijas SÍ pueden
+        // Aplicar reglas de negocio CORREGIDAS:
+        // 1. Orden maestra: Solo facturar si el instituto SÍ paga (facturación centralizada)
+        // 2. Orden normal/hija: Solo facturar si el instituto NO paga (pagos individuales)
         
         if ($is_master_order) {
-            // Orden maestra: Solo facturar si el instituto paga
-            $should_show = !$school_billing_enabled;
-        } elseif ($is_child_order) {
-            // Orden hija: INVERSO a la master (si master puede, hija NO puede)
+            // Orden maestra: Solo facturar si el instituto paga (facturación centralizada)
             $should_show = $school_billing_enabled;
         } else {
-            // Orden normal: Solo facturar si el instituto NO paga
-            $should_show = $school_billing_enabled;
+            // Orden normal o hija: Solo facturar si el instituto NO paga (pagos individuales)
+            $should_show = !$school_billing_enabled;
         }
 
         return $should_show;
