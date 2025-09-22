@@ -3,8 +3,11 @@
  * Invoice Button Filter - Controla cuándo mostrar botones de PDF de facturas
  * 
  * REGLAS DE NEGOCIO CORREGIDAS:
- * 1. Órdenes normales: Solo mostrar botón si el instituto NO paga (pagos individuales por padres)
+ * 1. Órdenes individuales: Solo mostrar botón si el instituto NO paga (pagos individuales por padres)
+ *    - Incluye pedidos normales y pedidos "hijos" de master orders
+ *    - Si el centro no paga, los padres facturan individualmente
  * 2. Órdenes maestras: Solo mostrar botón si el instituto SÍ paga (facturación centralizada)
+ *    - El centro paga directamente al proveedor por todos los pedidos del grupo
  * 
  * INTERPRETACIÓN DEL CAMPO ACF:
  * - the_billing_by_the_school = true  → El colegio NO paga (los padres pagan individualmente)
@@ -304,13 +307,14 @@ class InvoiceButtonFilter
         
         // Aplicar reglas de negocio CORREGIDAS:
         // 1. Orden maestra: Solo facturar si el instituto SÍ paga (facturación centralizada)
-        // 2. Orden normal/hija: Solo facturar si el instituto NO paga (pagos individuales)
+        // 2. Orden individual/hija: Solo facturar si el instituto NO paga (pagos individuales por padres)
         
         if ($is_master_order) {
             // Orden maestra: Solo facturar si el instituto paga (facturación centralizada)
             $should_show = $school_billing_enabled;
         } else {
-            // Orden normal o hija: Solo facturar si el instituto NO paga (pagos individuales)
+            // Orden individual o hija: SIEMPRE facturar si el instituto NO paga
+            // (Los padres pagan individualmente, independientemente de si hay master order)
             $should_show = !$school_billing_enabled;
         }
 
