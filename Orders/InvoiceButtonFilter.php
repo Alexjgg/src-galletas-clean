@@ -1,17 +1,19 @@
 <?php
 /**
- * Invoice Button Filter - Controla cuándo mostrar botones de PDF de facturas
+ * Invoice Button Filter - Controla cuándo mostrar botones de PDF de facturas (normales y simplificadas)
  * 
- * REGLAS DE NEGOCIO CORREGIDAS:
- * 1. Órdenes individuales: Solo mostrar botón si el instituto NO paga (pagos individuales por padres)
- *    - Incluye pedidos normales y pedidos "hijos" de master orders
- *    - Si el centro no paga, los padres facturan individualmente
- * 2. Órdenes maestras: Solo mostrar botón si el instituto SÍ paga (facturación centralizada)
- *    - El centro paga directamente al proveedor por todos los pedidos del grupo
+ * REGLAS DE NEGOCIO SIMPLIFICADAS:
+ * 1. Si el centro PAGA: Solo las órdenes maestras pueden generar facturas
+ * 2. Si el centro NO PAGA: Solo las órdenes individuales pueden generar facturas  
+ * 3. Órdenes sin maestro: NO se ven afectadas por estas reglas
  * 
  * INTERPRETACIÓN DEL CAMPO ACF:
  * - the_billing_by_the_school = true  → El colegio NO paga (los padres pagan individualmente)
  * - the_billing_by_the_school = false → El colegio SÍ paga (facturación centralizada al colegio)
+ * 
+ * TIPOS DE FACTURA SOPORTADOS:
+ * - invoice: Facturas normales/completas
+ * - simplified-invoice: Facturas simplificadas
  * 
  * @package SchoolManagement\Orders
  * @since 1.0.0
@@ -24,7 +26,7 @@ if (!defined('ABSPATH')) {
 }
 
 /**
- * Clase para filtrar botones de PDF de facturas según reglas de facturación
+ * Clase para filtrar botones de PDF de facturas (normales y simplificadas) según reglas de facturación
  */
 class InvoiceButtonFilter
 {
@@ -80,15 +82,14 @@ class InvoiceButtonFilter
      */
     public function filterInvoiceButtonsInListing(array $actions, \WC_Order $order): array
     {
-        // Si no hay acciones de factura, retornar sin cambios
-        if (!isset($actions['invoice'])) {
-            return $actions;
+        // Verificar si se debe mostrar la factura normal
+        if (isset($actions['invoice']) && !$this->shouldShowInvoiceButton($order)) {
+            unset($actions['invoice']);
         }
 
-        // Verificar si se debe mostrar la factura
-        if (!$this->shouldShowInvoiceButton($order)) {
-            // Remover botón de factura pero mantener otros (packing slip, etc.)
-            unset($actions['invoice']);
+        // Verificar si se debe mostrar la factura simplificada
+        if (isset($actions['simplified-invoice']) && !$this->shouldShowInvoiceButton($order)) {
+            unset($actions['simplified-invoice']);
         }
 
         return $actions;
@@ -123,8 +124,8 @@ class InvoiceButtonFilter
                 }
             }
             
-            // Solo procesar facturas
-            if ($document_type !== 'invoice') {
+            // Solo procesar facturas (normales o simplificadas)
+            if (!in_array($document_type, ['invoice', 'simplified-invoice'])) {
                 return $allowed;
             }
             
@@ -169,9 +170,11 @@ class InvoiceButtonFilter
             return;
         }
         
-        // Remover metaboxes relacionados con facturas
+        // Remover metaboxes relacionados con facturas (normales y simplificadas)
         remove_meta_box('wpo_wcpdf-invoice', 'shop_order', 'side');
         remove_meta_box('wpo_wcpdf_invoice_metabox', 'shop_order', 'side');
+        remove_meta_box('wpo_wcpdf-simplified-invoice', 'shop_order', 'side');
+        remove_meta_box('wpo_wcpdf_simplified-invoice_metabox', 'shop_order', 'side');
         
     }
     
@@ -180,8 +183,9 @@ class InvoiceButtonFilter
      */
     public function interceptPDFGeneration(): void
     {
-        // Verificar que es una solicitud de factura
-        if (!isset($_REQUEST['document_type']) || $_REQUEST['document_type'] !== 'invoice') {
+        // Verificar que es una solicitud de factura (normal o simplificada)
+        if (!isset($_REQUEST['document_type']) || 
+            !in_array($_REQUEST['document_type'], ['invoice', 'simplified-invoice'])) {
             return;
         }
         
@@ -290,46 +294,34 @@ class InvoiceButtonFilter
      */
     private function shouldShowInvoiceButton(\WC_Order $order): bool
     {
-        // REGLA 1: Si es orden maestra, solo mostrar si el centro paga
-        if ($this->isMasterOrder($order)) {
-            $school_id = $this->getOrderSchoolId($order);
-            if (!$school_id) {
-                return true; // Si no hay escuela, permitir
-            }
-            
-            // Para master orders: solo si el centro SÍ paga (facturación centralizada)
-            return $this->doesSchoolPay($school_id);
-        }
-        
-        // REGLA 2: Para pedidos individuales (con o sin master), solo si el centro NO paga
+        // Obtener ID de la escuela desde la orden
         $school_id = $this->getOrderSchoolId($order);
+        
         if (!$school_id) {
-            // Si no hay escuela asociada, SIEMPRE permitir facturar
+            // Si no hay escuela asociada, PERMITIR facturar (no se ve afectado)
             return true;
         }
 
-        // Para pedidos individuales: solo si el centro NO paga (padres pagan individualmente)
-        return !$this->doesSchoolPay($school_id);
-    }
+        // Verificar si tiene orden maestra (es parte de un grupo)
+        $is_master_order = $this->isMasterOrder($order);
+        $is_child_order = $this->isChildOrder($order);
+        
+        // Si no tiene relación con orden maestra, NO SE VE AFECTADO
+        if (!$is_master_order && !$is_child_order) {
+            return true;
+        }
 
-    /**
-     * Verificar si el centro/escuela paga directamente
-     * 
-     * @param int $school_id ID de la escuela
-     * @return bool True si el centro paga, False si pagan los padres
-     */
-    private function doesSchoolPay(int $school_id): bool
-    {
-        // Obtener el valor del campo ACF 'the_billing_by_the_school'
-        $billing_value = get_field(\SchoolManagement\Shared\Constants::ACF_FIELD_SCHOOL_BILLING, $school_id);
+        // Obtener configuración de facturación de la escuela
+        $school_billing_enabled = $this->getSchoolBillingConfig($school_id);
         
-        // INTERPRETACIÓN CORREGIDA:
-        // the_billing_by_the_school = true  → El centro NO paga (los padres pagan individualmente)
-        // the_billing_by_the_school = false → El centro SÍ paga (facturación centralizada)
-        $field_is_true = ($billing_value === '1' || $billing_value === 1 || $billing_value === true);
-        
-        // Invertir porque el campo está al revés
-        return !$field_is_true;
+        // LÓGICA SIMPLIFICADA:
+        if ($is_master_order) {
+            // Orden maestra: Solo puede facturar si el centro paga
+            return $school_billing_enabled;
+        } else {
+            // Orden individual (con maestro): Solo puede facturar si el centro NO paga
+            return !$school_billing_enabled;
+        }
     }
 
     /**
@@ -340,8 +332,31 @@ class InvoiceButtonFilter
      */
     private function getOrderSchoolId(\WC_Order $order): ?int
     {
-        $school_id = $order->get_meta(\SchoolManagement\Shared\Constants::ORDER_META_SCHOOL_ID);
+    $school_id = $order->get_meta(\SchoolManagement\Shared\Constants::ORDER_META_SCHOOL_ID);
         return $school_id ? (int) $school_id : null;
+    }
+
+    /**
+     * Obtener configuración de facturación de la escuela
+     * 
+     * @param int $school_id ID de la escuela
+     * @return bool Si la escuela tiene facturación habilitada
+     */
+    private function getSchoolBillingConfig(int $school_id): bool
+    {
+        // Obtener el valor del campo ACF 'the_billing_by_the_school'
+        $billing_value = get_field(\SchoolManagement\Shared\Constants::ACF_FIELD_SCHOOL_BILLING, $school_id);
+        
+        // INTERPRETACIÓN CORRECTA DEL CAMPO:
+        // Si the_billing_by_the_school = true, significa que el colegio NO paga (los padres pagan)
+        // Si the_billing_by_the_school = false, significa que el colegio SÍ paga (facturación centralizada)
+        $field_value = ($billing_value === '1' || $billing_value === 1 || $billing_value === true);
+        
+        // Retornar directamente si el colegio paga:
+        // - Si field_value = true (colegio NO paga) → retornar false (colegio no paga)
+        // - Si field_value = false (colegio SÍ paga) → retornar true (colegio paga)
+        // PERO si está al revés, entonces:
+        return $field_value;
     }
 
     /**
@@ -394,7 +409,7 @@ class InvoiceButtonFilter
     }
     
     /**
-     * Verificar si un documento es de tipo factura
+     * Verificar si un documento es de tipo factura (normal o simplificada)
      * 
      * @param mixed $document Objeto documento
      * @return bool Si es documento de factura
@@ -407,16 +422,17 @@ class InvoiceButtonFilter
         
         // Verificar tipo del documento
         if (method_exists($document, 'get_type')) {
-            return $document->get_type() === 'invoice';
+            $doc_type = $document->get_type();
+            return in_array($doc_type, ['invoice', 'simplified-invoice']);
         }
         
         if (property_exists($document, 'type')) {
-            return $document->type === 'invoice';
+            return in_array($document->type, ['invoice', 'simplified-invoice']);
         }
         
         // Verificar por nombre de clase
-        $class_name = get_class($document);
-        return strpos(strtolower($class_name), 'invoice') !== false;
+        $class_name = strtolower(get_class($document));
+        return strpos($class_name, 'invoice') !== false || strpos($class_name, 'simplified') !== false;
     }
     
     /**

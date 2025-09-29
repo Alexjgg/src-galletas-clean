@@ -79,34 +79,26 @@ class VendorFieldValidator
      */
     private function initHooks(): void
     {
-        // Permitir subida de certificados .p12/.pfx desde este módulo
+        // Allow certificate uploads
         add_filter('upload_mimes', [$this, 'allowCertificateMimes'], 1, 1);
         
-        // INTERCEPTAR DESPUÉS DE QUE WORDPRESS PROCESE EL ARCHIVO
+        // Handle uploaded certificate files
         add_filter('wp_handle_upload', [$this, 'handleUploadedFile'], 10, 2);
         
-        // Validación del servidor antes de guardar
-        add_action('acf/save_post', [$this, 'validateVendorBeforeSave'], 25);
+        // ACF native validation hook
+        add_action('acf/validate_save_post', [$this, 'validateWithACFNativeHook'], 10);
         
-        // Admin notices para mostrar errores de validación
+        // Admin notices for validation errors
         add_action('admin_notices', [$this, 'showValidationErrors']);
-        
-                // MIGRACIÓN TEMPORALMENTE DESHABILITADA
-        // add_action('acf/save_post', [$this, 'migrateVendorFieldsAfterSave'], 20);
-
-        // CARGA DE VALORES ANTIGUOS TEMPORALMENTE DESHABILITADA
-        // add_filter('acf/load_value', [$this, 'forceLoadVendorFieldValues'], 10, 3);
-        // add_filter('acf/load_field', [$this, 'preloadVendorFieldValue']);
     }
 
 
 
     /**
-     * Permite subir certificados .p12 y .pfx
+     * Allow certificate uploads (.p12, .pfx, .pem)
      */
     public function allowCertificateMimes($mime_types)
     {
-        // Limitar a usuarios con capacidad de subir ficheros (editores/administradores)
         if (current_user_can('upload_files')) {
             $mime_types['p12'] = 'application/x-pkcs12';
             $mime_types['pfx'] = 'application/x-pkcs12';
@@ -116,17 +108,16 @@ class VendorFieldValidator
     }
 
     /**
-     * INTERCEPTAR ARCHIVOS DESPUÉS DE QUE WORDPRESS LOS PROCESE CORRECTAMENTE
-     * Este método se ejecuta DESPUÉS de que WordPress haya validado y subido el archivo
+     * Handle uploaded certificate files and move to secure location
      */
     public function handleUploadedFile($upload, $context)
     {
-        // Solo procesar si la subida fue exitosa
+        // Only process successful uploads
         if (isset($upload['error']) && !empty($upload['error'])) {
             return $upload;
         }
 
-        // Verificar si es un certificado
+        // Verify file exists
         if (!isset($upload['file']) || !file_exists($upload['file'])) {
             return $upload;
         }
@@ -134,37 +125,37 @@ class VendorFieldValidator
         $file_path = $upload['file'];
         $ext = strtolower(pathinfo($file_path, PATHINFO_EXTENSION));
         
+        // Only process certificate files
         if (!in_array($ext, ['pfx', 'p12', 'pem'])) {
-            return $upload; // No es un certificado, continuar normalmente
+            return $upload;
         }
 
-        // Verificar si estamos en un contexto de vendor
+        // Verify vendor context
         $post_id = $this->getCurrentPostId();
         if (!$post_id || !$this->isVendorPost($post_id)) {
-            return $upload; // No es un vendor, continuar normalmente
+            return $upload;
         }
 
-        // MOVER EL ARCHIVO A UBICACIÓN SEGURA
+        // Move to secure location
         $secure_upload = $this->moveToSecureLocation($upload);
-        
-        return $secure_upload ? $secure_upload : $upload;
+        return $secure_upload ?: $upload;
     }
 
     /**
-     * Mover archivo subido a ubicación segura
+     * Move uploaded file to secure location
      */
     private function moveToSecureLocation($upload)
     {
         $original_file = $upload['file'];
         $original_url = $upload['url'];
         
-        // Configurar ubicación segura
+        // Configure secure location
         $upload_dir = wp_upload_dir();
         $year = date("Y");
         $target_dir = trailingslashit($upload_dir['basedir']) . ".vendor-certs/{$year}/";
         $target_url_base = trailingslashit($upload_dir['baseurl']) . ".vendor-certs/{$year}/";
 
-        // Crear directorio si no existe
+        // Create directory if needed
         if (!file_exists($target_dir)) {
             if (!wp_mkdir_p($target_dir)) {
                 return false;
@@ -172,15 +163,14 @@ class VendorFieldValidator
             $this->createVendorCertProtectionFiles($target_dir);
         }
 
-        // Generar nombre aleatorio
+        // Generate secure filename
         $ext = strtolower(pathinfo($original_file, PATHINFO_EXTENSION));
         $new_filename = wp_generate_password(64, false) . '.' . $ext;
         $new_file_path = $target_dir . $new_filename;
         $new_url = $target_url_base . $new_filename;
 
-        // Mover archivo
+        // Move file
         if (rename($original_file, $new_file_path)) {
-            // Devolver la nueva información del archivo
             return [
                 'file' => $new_file_path,
                 'url' => $new_url,
@@ -197,17 +187,17 @@ class VendorFieldValidator
     private function getCurrentPostId()
     {
         // From POST data
-        if (isset($_POST['post_ID'])) return (int)$_POST['post_ID'];
-        if (isset($_POST['post_id'])) return (int)$_POST['post_id'];
-        
-        // From GET parameter
-        if (isset($_GET['post'])) return (int)$_GET['post'];
+        if (isset($_POST['post_ID'])) {
+            return (int)$_POST['post_ID'];
+        } elseif (isset($_POST['post_id'])) {
+            return (int)$_POST['post_id'];
+        } elseif (isset($_GET['post'])) {
+            return (int)$_GET['post'];
+        }
         
         // From global $post
         global $post;
-        if ($post && $post->ID) return $post->ID;
-        
-        return 0;
+        return $post && $post->ID ? $post->ID : 0;
     }
 
     /**
@@ -284,114 +274,84 @@ class VendorFieldValidator
     }
 
     /**
-     * MIGRAR CAMPOS DESPUÉS DE GUARDAR - TEMPORALMENTE DESHABILITADO
-     * Se ejecuta después de que ACF termine de procesar todos los campos
-     * 
-     * @param int $post_id Post ID being saved
+     * ACF native validation hook - recommended approach
+     * ACF has processed the data and is available via get_field()
      */
-    public function migrateFieldsAfterSave($post_id): void
+    public function validateWithACFNativeHook(): void
     {
-        // MIGRACIÓN TEMPORALMENTE DESHABILITADA
-        return;
+        global $post;
         
-        /*
-        // Solo actuar en posts de tipo vendor
-        if (!$this->isVendorPost($post_id)) {
+        // Only validate vendor posts
+        if (!$post || !$this->isVendorPost($post->ID)) {
             return;
         }
 
-        // Skip autosave y revisiones
-        if (defined('DOING_AUTOSAVE') && DOING_AUTOSAVE) {
-            return;
-        }
-        if (wp_is_post_revision($post_id)) {
-            return;
-        }
-
-        // Mapeo de nombres antiguos a nuevos
-        $field_migration = [
-            '_PersonTypeCode' => '_personTypeCode',
-            '_TaxIdentificationNumber' => '_taxIdentificationNumber',
-            '_FirstSurname' => '_firstSurname',
-            '_SecondSurname' => '_secondSurname',
-            '_CorporateName' => '_corporateName',
-            '_Address' => '_address',
-            '_Town' => '_town',
-            '_PostCode' => '_postCode',
-            '_Province' => '_province',
-            '_LegalLiteral' => '_legalLiteral'
-        ];
-
-        $migrated = 0;
-
-        foreach ($field_migration as $old_name => $new_name) {
-            // Obtener valores de ambos campos
-            $new_value = get_post_meta($post_id, $new_name, true);
-            $old_value = get_post_meta($post_id, $old_name, true);
-            
-            // Solo migrar si:
-            // 1. El campo antiguo tiene valor
-            // 2. Y el campo nuevo está vacío O tiene el mismo valor (evitar sobrescribir cambios)
-            if (!empty($old_value) && (empty($new_value) || $new_value === $old_value)) {
-                // Migrar el valor
-                $result = update_post_meta($post_id, $new_name, $old_value);
-                
-                if ($result) {
-                    $migrated++;
+        // Collect data directly from ACF processed fields
+        $this->collectDataFromACFFields($post->ID);
+        
+        // Perform complete validation
+        $validation_result = $this->performCompleteValidation();
+        
+        // If there are errors, use ACF's native error function
+        if (!$validation_result['is_valid']) {
+            foreach ($validation_result['errors'] as $field_name => $messages) {
+                foreach ($messages as $message) {
+                    acf_add_validation_error($field_name, $message);
                 }
             }
         }
-
-        if ($migrated > 0) {
-            // Limpiar caché para asegurar que se leen los nuevos valores
-            wp_cache_delete($post_id, 'post_meta');
-            clean_post_cache($post_id);
-        }
-        */
     }
 
     /**
-     * Validate vendor data before saving post (SERVER-SIDE ONLY)
-     * Si hay errores, bloquea la actualización y muestra errores en la misma página
+     * Collect data directly from ACF fields (no manual mapping needed)
+     * ACF has processed $_POST and we can use get_field() directly
      * 
-     * @param int $post_id Post ID being saved
+     * @param int $post_id
      */
-    public function validateVendorBeforeSave($post_id): void
+    private function collectDataFromACFFields($post_id): void
     {
-        // Solo validar posts de tipo vendor
-        if (!$this->isVendorPost($post_id)) {
-            return;
+        // List of fields we want to validate
+        $vendor_fields = [
+            '_personTypeCode',
+            '_taxIdentificationNumber', 
+            '_phone',
+            '_email',
+            '_Name',
+            '_firstSurname',
+            '_secondSurname',
+            '_corporateName',
+            '_address',
+            '_town',
+            '_postCode',
+            '_province',
+            '_legalLiteral',
+            '_certificate',
+            '_invoice_number',
+            '_prefix',
+            '_suffix'
+        ];
+
+        $this->data = [];
+
+        // Get values directly with get_field() - ACF handles everything internally
+        foreach ($vendor_fields as $field_name) {
+            $value = get_field($field_name, $post_id);
+            if ($value !== false && $value !== null && $value !== '') {
+                $this->data[$field_name] = $value;
+            }
         }
 
-        // Skip autosave
-        if (defined('DOING_AUTOSAVE') && DOING_AUTOSAVE) {
-            return;
-        }
-
-        // Skip si es una revisión
-        if (wp_is_post_revision($post_id)) {
-            return;
-        }
-        
-        // Recopilar datos del formulario ACF
-        $this->collectFormData($post_id);
-        
-        // Realizar validación completa
-        $validation_result = $this->performCompleteValidation();
-        
-        // Si hay errores, BLOQUEAR el guardado
-        if (!$validation_result['is_valid']) {
-            
-            // Guardar errores para mostrar en la misma página
-            set_transient('vendor_validation_errors_' . $post_id, $validation_result['errors'], 300);
-            set_transient('vendor_validation_blocked_' . $post_id, true, 300);
-            
-            // Redireccionar de vuelta al formulario con errores
-            $redirect_url = admin_url('post.php?post=' . $post_id . '&action=edit');
-            wp_redirect($redirect_url);
-            exit;
+        // Normalize certificate if exists
+        if (isset($this->data['_certificate'])) {
+            $cert = $this->data['_certificate'];
+            if (is_array($cert)) {
+                $this->data['_certificate'] = $cert['id'] ?? $cert['ID'] ?? '';
+            }
         }
     }
+
+    /**
+     * Obtener nombre legible del campo para mostrar
 
     /**
      * Obtener nombre legible del campo para mostrar
@@ -425,33 +385,6 @@ class VendorFieldValidator
     }
 
     /**
-     * Collect form data from $_POST ACF fields
-     * 
-     * @param int $post_id The post ID to collect data for
-     */
-    private function collectFormData($post_id): void
-    {
-        $this->data = [];
-        
-        // Prefill with existing stored values
-        $this->data = $this->getExistingVendorData($post_id);
-        
-        if (!isset($_POST['acf']) || !is_array($_POST['acf'])) {
-            return;
-        }
-
-        // Usar el mapeo manual para obtener datos del formulario
-        $field_mapping = $this->getFieldMapping();
-        
-        foreach ($_POST['acf'] as $field_key => $value) {
-            if (isset($field_mapping[$field_key])) {
-                $field_name = $field_mapping[$field_key];
-                $this->data[$field_name] = $value;
-            }
-        }
-    }
-
-    /**
      * Get existing vendor meta as defaults, normalized for validation
      * 
      * @param int $post_id The post ID to get data for
@@ -465,7 +398,7 @@ class VendorFieldValidator
             return $defaults;
         }
 
-        // Intentar con nombres específicos conocidos
+        // Try with known field names
         $known_fields = [
             '_personTypeCode', '_taxIdentificationNumber', '_phone', '_email', 
             '_Name', '_firstSurname', '_secondSurname', '_corporateName',
@@ -481,32 +414,10 @@ class VendorFieldValidator
             }
         }
 
-        // Compatibilidad con nombres antiguos (solo si no hay datos nuevos)
-        $field_name_compatibility = [
-            '_personTypeCode' => '_PersonTypeCode',
-            '_taxIdentificationNumber' => '_TaxIdentificationNumber', 
-            '_firstSurname' => '_FirstSurname',
-            '_secondSurname' => '_SecondSurname',
-            '_corporateName' => '_CorporateName',
-            '_address' => '_Address',
-            '_town' => '_Town',
-            '_postCode' => '_PostCode',
-            '_province' => '_Province',
-            '_legalLiteral' => '_LegalLiteral',
-        ];
-
-        foreach ($field_name_compatibility as $new_name => $old_name) {
-            if (!isset($defaults[$new_name]) || empty($defaults[$new_name])) {
-                $old_value = get_field($old_name, $post_id);
-                if (!empty($old_value)) {
-                    $defaults[$new_name] = $old_value;
-                }
-            }
-        }
-
-        // Normalizar certificado
+        // Normalize certificate
         if (isset($defaults['_certificate'])) {
             $val = $defaults['_certificate'];
+            
             if (is_array($val)) {
                 $id = $val['id'] ?? $val['ID'] ?? null;
                 $defaults['_certificate'] = $id ? (int)$id : '';
@@ -518,35 +429,6 @@ class VendorFieldValidator
         }
 
         return $defaults;
-    }
-
-    /**
-     * Get ACF field key to field name mapping
-     * 
-     * @return array
-     */
-    private function getFieldMapping(): array
-    {
-        return [
-            // Mapeo basado en el grupo ACF group_6398863b844ce
-            'field_personTypeCode' => '_personTypeCode',
-            'field_taxIdentificationNumber' => '_taxIdentificationNumber', 
-            'field_phone' => '_phone',
-            'field_email' => '_email',
-            'field_Name' => '_Name',
-            'field_firstSurname' => '_firstSurname',
-            'field_secondSurname' => '_secondSurname',
-            'field_corporateName' => '_corporateName',
-            'field_address' => '_address',
-            'field_town' => '_town',
-            'field_postCode' => '_postCode',
-            'field_province' => '_province',
-            'field_legalLiteral' => '_legalLiteral',
-            'field_prefix' => '_prefix',
-            'field_suffix' => '_suffix',
-            'field_invoice_number' => '_invoice_number',
-            'field_certificate' => '_certificate'
-        ];
     }
 
     /**
@@ -592,7 +474,7 @@ class VendorFieldValidator
     {
         $this->errors = [];
 
-        // Validaciones de campos obligatorios
+        // Required field validations
         $this->validatePersonType();
         $this->validateTaxIdentificationNumber();
         $this->validatePhone();
@@ -604,7 +486,8 @@ class VendorFieldValidator
         $this->validateLegalLiteral();
         $this->validateCertificate();
         $this->validateInvoiceSuffix();
-        // Validaciones condicionales según el tipo de persona
+        
+        // Conditional validations based on person type
         $this->validateConditionalFields();
 
         return [
@@ -841,14 +724,13 @@ class VendorFieldValidator
     {
         $field = '_certificate';
 
-        // If already have a stored attachment ID, accept it (no need to re-upload on every save)
+        // If already have a stored attachment ID, validate it exists
         if (!empty($this->data[$field]) && (is_int($this->data[$field]) || ctype_digit((string)$this->data[$field]))) {
-            // Verificar que el attachment existe
             $attachment_id = (int) $this->data[$field];
             $file_path = get_attached_file($attachment_id);
             
             if ($file_path && file_exists($file_path)) {
-                return; // OK: existing attachment ID
+                return; // Valid existing attachment
             } else {
                 $this->addError($field, __('The stored certificate file no longer exists. Please upload a new certificate.', 'neve-child'));
                 return;
@@ -859,9 +741,6 @@ class VendorFieldValidator
             $this->addError($field, __('Digital certificate is required', 'neve-child'));
             return;
         }
-
-        // Si hay datos pero no es un ID válido, continuar
-        // La interceptación se hace DESPUÉS de la subida con wp_handle_upload
     }
 
     /**
@@ -905,8 +784,9 @@ class VendorFieldValidator
 
         // Suffix is optional, but if provided, validate format
         if (!empty($suffix)) {
-            if (!preg_match('/^[a-zA-Z0-9]{1,10}$/', $suffix)) {
-                $this->addError($field, __('Suffix must contain only letters and numbers (maximum 10 characters)', 'neve-child'));
+            // Allow letters, numbers, and common invoice separators like hyphens and underscores
+            if (!preg_match('/^[a-zA-Z0-9_-]{1,10}$/', $suffix)) {
+                $this->addError($field, __('Suffix must contain only letters, numbers, hyphens, and underscores (maximum 10 characters)', 'neve-child'));
             }
         }
     }
@@ -1082,146 +962,5 @@ class VendorFieldValidator
     public function setFormData(array $data): void
     {
         $this->data = $data;
-    }
-
-    /**
-     * FORZAR CARGA DE VALORES ACF - TEMPORALMENTE DESHABILITADO
-     * Hook: acf/load_value - Se ejecuta cuando ACF intenta cargar un valor para mostrar
-     * 
-     * @param mixed $value El valor que ACF quiere mostrar
-     * @param int $post_id ID del post
-     * @param array $field Información del campo ACF
-     * @return mixed
-     */
-    public function forceLoadVendorFieldValues($value, $post_id, $field)
-    {
-        // CARGA AUTOMÁTICA DE VALORES ANTIGUOS TEMPORALMENTE DESHABILITADA
-        return $value;
-        
-        /*
-        // Solo actuar en posts de tipo vendor
-        if (!$this->isVendorPost($post_id)) {
-            return $value;
-        }
-
-        // Solo actuar en campos de vendor conocidos
-        $vendor_field_keys = $this->getFieldMapping();
-        $field_key = $field['key'] ?? '';
-        
-        if (!isset($vendor_field_keys[$field_key])) {
-            return $value;
-        }
-
-        $field_name = $vendor_field_keys[$field_key];
-        
-        // Si ACF ya tiene un valor válido, no interferir
-        if (!empty($value)) {
-            return $value;
-        }
-
-        // Intentar cargar desde post meta directo
-        $meta_value = get_post_meta($post_id, $field_name, true);
-        
-        // Si no hay valor en el campo nuevo, buscar en el campo antiguo
-        if (empty($meta_value)) {
-            $old_field_name = $this->getOldFieldName($field_name);
-            if ($old_field_name) {
-                $meta_value = get_post_meta($post_id, $old_field_name, true);
-                
-                // Si encontramos valor en campo antiguo, copiarlo al nuevo automáticamente
-                if (!empty($meta_value)) {
-                    update_post_meta($post_id, $field_name, $meta_value);
-                }
-            }
-        }
-
-        // Si encontramos valor, devolverlo para que ACF lo muestre
-        if (!empty($meta_value)) {
-            return $meta_value;
-        }
-
-        return $value;
-        */
-    }
-
-    /**
-     * PRECARGAR VALORES POR DEFECTO - TEMPORALMENTE DESHABILITADO
-     * Hook: acf/load_field - Se ejecuta cuando ACF carga la definición del campo
-     * 
-     * @param array $field La definición del campo ACF
-     * @return array
-     */
-    public function preloadVendorFieldValue($field)
-    {
-        // PRECARGA DE VALORES ANTIGUOS TEMPORALMENTE DESHABILITADA
-        return $field;
-        
-        /*
-        global $post;
-        
-        // Solo en posts de vendor
-        if (!$post || !$this->isVendorPost($post->ID)) {
-            return $field;
-        }
-
-        $vendor_fields = $this->getFieldMapping();
-        $field_key = $field['key'] ?? '';
-        
-        if (isset($vendor_fields[$field_key])) {
-            $field_name = $vendor_fields[$field_key];
-            
-            // Intentar cargar el valor guardado
-            $meta_value = get_post_meta($post->ID, $field_name, true);
-            
-            // Si no hay valor en el nuevo, buscar en el antiguo
-            if (empty($meta_value)) {
-                $old_field_name = $this->getOldFieldName($field_name);
-                if ($old_field_name) {
-                    $meta_value = get_post_meta($post->ID, $old_field_name, true);
-                    
-                    // Auto-migrar si encontramos datos en campo antiguo
-                    if (!empty($meta_value)) {
-                        update_post_meta($post->ID, $field_name, $meta_value);
-                    }
-                }
-            }
-
-            // Establecer el valor por defecto si lo encontramos
-            if (!empty($meta_value)) {
-                $field['default_value'] = $meta_value;
-            }
-        }
-
-        return $field;
-        */
-    }
-
-    /**
-     * Get old field name for compatibility - TEMPORALMENTE DESHABILITADO
-     * 
-     * @param string $new_field_name
-     * @return string|null
-     */
-    private function getOldFieldName($new_field_name): ?string
-    {
-        // MAPEO DE COMPATIBILIDAD TEMPORALMENTE DESHABILITADO
-        return null;
-        
-        /*
-        $compatibility_map = [
-            '_personTypeCode' => '_PersonTypeCode',
-            '_taxIdentificationNumber' => '_TaxIdentificationNumber',
-            '_firstSurname' => '_FirstSurname',
-            '_secondSurname' => '_SecondSurname',
-            '_corporateName' => '_CorporateName',
-            '_address' => '_Address',
-            '_town' => '_Town',
-            '_postCode' => '_PostCode',
-            '_province' => '_Province',
-            '_legalLiteral' => '_LegalLiteral'
-        ];
-
-        return $compatibility_map[$new_field_name] ?? null;
-        */
     }
 }

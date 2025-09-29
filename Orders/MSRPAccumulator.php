@@ -36,6 +36,11 @@ class MSRPAccumulator
     private const ORDER_MSRP_TOTAL_META = '_order_msrp_total';
     
     /**
+     * Flag to prevent automatic recalculations during refund processing
+     */
+    private static $processing_refund = false;
+    
+    /**
      * ACF field name for product MSRP price
      */
     private const PRODUCT_MSRP_FIELD = 'msrp_price';
@@ -66,6 +71,7 @@ class MSRPAccumulator
         
         // Hook when refund is created
         add_action('woocommerce_order_refunded', [$this, 'subtractRefundMSRPFromUser'], 10, 2);
+        error_log("🔧 MSRP DEBUG - Hook 'woocommerce_order_refunded' registrado correctamente");
         
         // Hook when order status changes from completed/processing to cancelled/failed (subtract)
         add_action('woocommerce_order_status_cancelled', [$this, 'subtractOrderMSRPFromUser'], 10, 2);
@@ -107,11 +113,11 @@ class MSRPAccumulator
             return;
         }
 
-        // Check if we already processed this order
-        $already_processed = $order->get_meta('_msrp_processed');
-        if ($already_processed) {
-            return;
-        }
+        // // Check if we already processed this order
+        // $already_processed = $order->get_meta('_msrp_processed');
+        // if ($already_processed) {
+        //     return;
+        // }
 
         $order_msrp_total = $this->calculateOrderMSRPTotal($order);
         
@@ -180,34 +186,110 @@ class MSRPAccumulator
      */
     public function subtractRefundMSRPFromUser(int $order_id, int $refund_id): void
     {
+        // ACTIVAR bandera para prevenir recálculos automáticos
+        self::$processing_refund = true;
+        
+        error_log("🔄 MSRP REFUND DEBUG - INICIO: Order #{$order_id}, Refund #{$refund_id}");
+        error_log("🛡️  REFUND PROTECTION - Bandera activada para prevenir recálculos automáticos");
+        
         $order = wc_get_order($order_id);
         $refund = wc_get_order($refund_id);
         
+        // DEBUGGING CRÍTICO: Verificar tipos de objeto y IDs
+        error_log("🔍 REFUND DEBUG - Order type: " . ($order ? get_class($order) : 'NULL'));
+        error_log("🔍 REFUND DEBUG - Refund type: " . ($refund ? get_class($refund) : 'NULL'));
+        error_log("🔍 REFUND DEBUG - Order ID verificado: " . ($order ? $order->get_id() : 'NULL'));
+        error_log("🔍 REFUND DEBUG - Refund ID verificado: " . ($refund ? $refund->get_id() : 'NULL'));
+        
         if (!$order || !$refund) {
+            self::$processing_refund = false; // Restaurar bandera
             return;
         }
 
         $user_id = $order->get_user_id();
         if (!$user_id) {
+            self::$processing_refund = false; // Restaurar bandera
             return;
         }
 
         // Calculate MSRP for refunded items
+        error_log("🔄 MSRP REFUND DEBUG - Calculando MSRP para reembolso #{$refund_id}");
+        
+        // DEBUGGING CRÍTICO: Verificar items del reembolso
+        $refund_items = $refund->get_items();
+        error_log("🔍 REFUND DEBUG - Refund items count: " . count($refund_items));
+        
+        foreach ($refund_items as $item_id => $item) {
+            if ($item instanceof \WC_Order_Item_Product) {
+                $product_name = $item->get_name();
+                $quantity = $item->get_quantity();
+                $product_id = $item->get_product_id();
+                $variation_id = $item->get_variation_id();
+                error_log("🔍 REFUND DEBUG - Item: {$product_name} (ID:{$product_id}, Var:{$variation_id}), Qty: {$quantity}");
+            }
+        }
+        
         $refund_msrp_total = $this->calculateOrderMSRPTotal($refund);
+        error_log("🔄 MSRP REFUND DEBUG - MSRP calculado: {$refund_msrp_total}");
         
         // For refunds, the MSRP total should be positive (we'll subtract it)
         $refund_msrp_total = abs($refund_msrp_total);
+        error_log("🔄 MSRP REFUND DEBUG - Después de abs(): {$refund_msrp_total}");
         
         if ($refund_msrp_total <= 0) {
+            error_log("❌ MSRP REFUND DEBUG - MSRP <= 0, saltando reembolso");
+            self::$processing_refund = false; // Restaurar bandera
             return;
         }
 
+        // DEBUGGING: Verificar total del usuario antes del reembolso
+        $user_msrp_before = (float) get_user_meta($user_id, '_user_msrp_total', true);
+        error_log("🔍 REFUND DEBUG - MSRP usuario antes: €{$user_msrp_before}");
+        
         // Subtract from user's accumulated total
+        error_log("🔄 MSRP REFUND DEBUG - Restando €{$refund_msrp_total} del usuario #{$user_id}");
         $this->subtractFromUserMSRPTotal($user_id, $refund_msrp_total, $refund_id, 'refund');
+        
+        // DEBUGGING: Verificar total del usuario después del reembolso
+        $user_msrp_after = (float) get_user_meta($user_id, '_user_msrp_total', true);
+        error_log("🔍 REFUND DEBUG - MSRP usuario después: €{$user_msrp_after}");
+        error_log("🔍 REFUND DEBUG - Diferencia aplicada: €" . ($user_msrp_before - $user_msrp_after));
 
         // Store refund MSRP total for reference
         $refund->update_meta_data(self::ORDER_MSRP_TOTAL_META, $refund_msrp_total);
         $refund->save();
+        
+        // DESACTIVAR bandera - reembolso completado
+        self::$processing_refund = false;
+        error_log("🛡️  REFUND PROTECTION - Bandera desactivada, reembolso completado");
+        
+        error_log("✅ MSRP REFUND DEBUG - COMPLETADO: Reembolso #{$refund_id} procesado exitosamente");
+    }
+
+    /**
+     * Normalize MSRP price value to handle European decimal format (comma as decimal separator)
+     * 
+     * @param mixed $price_value The MSRP price value from ACF
+     * @return float|false Returns normalized float value or false if invalid
+     */
+    private function normalizeMSRPPrice($price_value)
+    {
+        if (empty($price_value)) {
+            return false;
+        }
+        
+        // Convert to string for processing
+        $price_str = (string) $price_value;
+        
+        // Replace comma with dot for decimal separator (European format support)
+        $normalized_price = str_replace(',', '.', $price_str);
+        
+        // Check if it's numeric after normalization
+        if (!is_numeric($normalized_price)) {
+            return false;
+        }
+        
+        return (float) $normalized_price;
     }
 
     /**
@@ -219,38 +301,67 @@ class MSRPAccumulator
     private function calculateOrderMSRPTotal($order): float
     {
         $total_msrp = 0.0;
+        $processed_items = 0;
+        $skipped_items = 0;
+        
+        error_log("MSRP Order Debug - Order ID: " . $order->get_id() . ", Order Items Count: " . count($order->get_items()));
+        
+        // Detectar si es un refund
+        $is_refund = $order instanceof \WC_Order_Refund;
+        if ($is_refund) {
+            error_log("🔄 MSRP REFUND CALC - Procesando WC_Order_Refund #{$order->get_id()}");
+            error_log("🔍 REFUND CALC DEBUG - Parent Order ID: " . $order->get_parent_id());
+            error_log("🔍 REFUND CALC DEBUG - Refund Amount: " . $order->get_amount());
+            error_log("🔍 REFUND CALC DEBUG - Refund Reason: " . $order->get_reason());
+        }
         
         foreach ($order->get_items() as $item_id => $item) {
             if (!$item instanceof \WC_Order_Item_Product) {
+                $skipped_items++;
+                error_log("MSRP Skip - Item ID: {$item_id} - Not a product item (type: " . get_class($item) . ")");
                 continue;
             }
 
             $product_id = $item->get_product_id();
             $variation_id = $item->get_variation_id();
+            $product_name = $item->get_name();
             
             // Use variation ID if available, otherwise product ID
             $product_id_for_acf = $variation_id ? $variation_id : $product_id;
             
             // Get MSRP price from ACF field
-            $msrp_price = get_field(self::PRODUCT_MSRP_FIELD, $product_id_for_acf);
+            $msrp_price_raw = get_field(self::PRODUCT_MSRP_FIELD, $product_id_for_acf);
+            $msrp_price = $this->normalizeMSRPPrice($msrp_price_raw);
             
-            if (!$msrp_price || !is_numeric($msrp_price)) {
+            if ($msrp_price === false) {
                 // Try to get from parent product if variation doesn't have it
                 if ($variation_id) {
-                    $msrp_price = get_field(self::PRODUCT_MSRP_FIELD, $product_id);
+                    $msrp_price_raw = get_field(self::PRODUCT_MSRP_FIELD, $product_id);
+                    $msrp_price = $this->normalizeMSRPPrice($msrp_price_raw);
+                    if ($msrp_price !== false) {
+                        error_log("MSRP Found - Item: '{$product_name}' (ID: {$product_id_for_acf}) - Found MSRP on parent product: {$msrp_price_raw} -> {$msrp_price}");
+                    }
                 }
                 
                 // If still no MSRP, skip this item
-                if (!$msrp_price || !is_numeric($msrp_price)) {
+                if ($msrp_price === false) {
+                    $skipped_items++;
+                    error_log("MSRP Skip - Item: '{$product_name}' (Product ID: {$product_id}, Variation ID: {$variation_id}) - No valid MSRP price (value: " . var_export($msrp_price_raw, true) . ")");
                     continue;
                 }
             }
 
             $quantity = $item->get_quantity();
             $item_msrp_total = (float) $msrp_price * abs($quantity);
+            
+            error_log("MSRP Item Debug - Product: '{$product_name}' (ID: {$product_id_for_acf}), MSRP Price: {$msrp_price}, Quantity: {$quantity}, Item MSRP Total: {$item_msrp_total}");
+            
             $total_msrp += $item_msrp_total;
+            $processed_items++;
         }
-
+        
+        error_log("MSRP Order Summary - Order ID: " . $order->get_id() . " - Processed: {$processed_items}, Skipped: {$skipped_items}, Total MSRP: {$total_msrp}");
+        
         return $total_msrp;
     }
 
@@ -383,6 +494,17 @@ class MSRPAccumulator
      */
     public function recalculateUserMSRPTotal(int $user_id): float
     {
+        // PREVENIR recálculos automáticos durante el procesamiento de reembolsos
+        if (self::$processing_refund) {
+            error_log("🛑 MSRP RECALCULATE BLOCKED - Reembolso en proceso para usuario #{$user_id}");
+            return (float) get_user_meta($user_id, self::USER_MSRP_TOTAL_META, true);
+        }
+        
+        // DEBUGGING: Log cada vez que se llama al recálculo
+        $backtrace = wp_debug_backtrace_summary();
+        error_log("🚨 MSRP RECALCULATE CALLED - Usuario #{$user_id}");
+        error_log("🔍 Called from: {$backtrace}");
+        
         $total = 0.0;
 
         // Get all completed/processing orders for this user
@@ -413,6 +535,9 @@ class MSRPAccumulator
 
         // Ensure total is not negative
         $total = max(0, $total);
+
+        // DEBUGGING: Log el resultado del recálculo
+        error_log("🔄 MSRP RECALCULATE RESULT - Usuario #{$user_id}: €{$total}");
 
         // Update user meta
         update_user_meta($user_id, self::USER_MSRP_TOTAL_META, $total);
@@ -477,7 +602,7 @@ class MSRPAccumulator
     }
 
     /**
-     * Update user's incoming total (Total Sales - MSRP)
+     * Update user's incoming total (MSRP - Total Sales)
      * 
      * @param int $user_id User ID
      * @return void
@@ -502,8 +627,15 @@ class MSRPAccumulator
             $total_sales += (float) $order->get_total();
         }
         
-        // Calcular incoming: Total Sales - MSRP
-        $incoming_total = max(0, $total_sales - $msrp_total); // No permitir valores negativos
+        // DEBUGGING: Log los valores para entender el cálculo
+        error_log("💰 INCOMING DEBUG - Usuario #{$user_id}:");
+        error_log("💰 INCOMING DEBUG - MSRP Total: €{$msrp_total}");
+        error_log("💰 INCOMING DEBUG - Total Sales: €{$total_sales}");
+        
+        // Calcular incoming: MSRP - Total Sales (diferencia/ganancia)
+        $incoming_total = max(0, $msrp_total - $total_sales); // No permitir valores negativos
+        
+        error_log("💰 INCOMING DEBUG - Incoming calculado: €{$incoming_total} (€{$msrp_total} - €{$total_sales})");
         
         // Guardar el valor calculado
         update_user_meta($user_id, self::USER_INCOMING_TOTAL_META, $incoming_total);
@@ -582,7 +714,7 @@ class MSRPAccumulator
             'total_sales' => $total_sales,
             'msrp_total' => $msrp_total,
             'incoming_total' => $incoming_total,
-            'calculation' => "€{$total_sales} - €{$msrp_total} = €{$incoming_total}"
+            'calculation' => "€{$msrp_total} - €{$total_sales} = €{$incoming_total}"
         ]);
     }
 

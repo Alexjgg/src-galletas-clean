@@ -194,8 +194,29 @@ class SchoolManagementBootstrap {
             
             // MÓDULOS DE INTEGRACIÓN
             'integration' => [
-                'SchoolManagement\Integration\VendorDataManager' => [],
-                'SchoolManagement\Integration\VendorFieldValidator' => [],
+                // Componentes especializados (se cargan primero)
+                // 'SchoolManagement\Integration\VendorAEATIntegration' => [
+                //     // Maneja integración con AEAT: hooks factupress_before_generate_register
+                //     'description' => 'Integración con AEAT para datos del vendor'
+                // ],
+                'SchoolManagement\Integration\VendorPDFManager' => [
+                    // Maneja PDFs y numeración: hooks wpo_wcpdf_*
+                    'description' => 'Manejo de datos del vendor en PDFs y numeración'
+                ],
+                
+                // Orquestador principal (depende de los componentes especializados)
+                'SchoolManagement\Integration\VendorDataManager' => [
+                    'dependencies' => [
+                        'SchoolManagement\Integration\VendorAEATIntegration',
+                        'SchoolManagement\Integration\VendorPDFManager'
+                    ],
+                    'description' => 'Orquestador principal - coordina AEAT y PDF'
+                ],
+                
+                // Validador de campos (independiente)
+                'SchoolManagement\Integration\VendorFieldValidator' => [
+                    'description' => 'Validación de campos de vendor'
+                ],
             ],
 
             'vendors' => [
@@ -263,11 +284,18 @@ class SchoolManagementBootstrap {
             $args = $config['args'] ?? [];
             
             // Resolver dependencias como argumentos
+            $dependencyInstances = [];
             if (!empty($config['dependencies'])) {
                 foreach ($config['dependencies'] as $dependency) {
-                    $args[] = self::$services[$dependency];
+                    if (!isset(self::$services[$dependency])) {
+                        throw new Exception("Dependencia no encontrada: {$dependency} para {$className}");
+                    }
+                    $dependencyInstances[] = self::$services[$dependency];
                 }
             }
+            
+            // Combinar argumentos configurados con dependencias
+            $allArgs = array_merge($args, $dependencyInstances);
             
             // Crear instancia
             if ($className === 'SchoolManagement\Payments\PaymentHandler') {
@@ -275,9 +303,9 @@ class SchoolManagementBootstrap {
                 $instance = $className::getInstance();
                 file_put_contents(ABSPATH . 'hook-test.log', date('Y-m-d H:i:s') . " - Bootstrap: PaymentHandler obtenido via Singleton\n", FILE_APPEND);
             } else {
-                $instance = empty($args) 
+                $instance = empty($allArgs) 
                     ? new $className() 
-                    : new $className(...$args);
+                    : new $className(...$allArgs);
             }
             
             // Almacenar en servicios

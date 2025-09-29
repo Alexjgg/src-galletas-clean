@@ -11,7 +11,9 @@
  * 3. Manejar cambios de estado automáticos cuando se generan PDFs
  * 4. Controlar flujo de estados de master orders y pedidos hijos
  * 
- * NOTA: La personalización de contenido de albaranes está en PackingSlipCustomizer.php
+ * NOTA: 
+ * - La personalización de contenido de albaranes está en PackingSlipCustomizer.php
+ * - El ordenamiento de productos se maneja automáticamente en MasterOrderManager.php
  * 
  * @package SchoolManagement\Orders
  * @since 1.0.0
@@ -40,7 +42,6 @@ class MasterOrderPackingSlips
      */
     private function initHooks(): void
     {
-        
         // MÉTODO DIRECTO: Agregar botones específicos para pedidos maestros
         add_filter('woocommerce_admin_order_actions', [$this, 'addMasterOrderPdfButtons'], 20, 2);
         

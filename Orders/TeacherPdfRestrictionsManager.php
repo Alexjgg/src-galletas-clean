@@ -10,6 +10,7 @@
  * - Bloquea la generación de PDFs a nivel de plugin, no solo UI
  * - Proporciona mejor integración y feedback al usuario
  * - Más mantenible y menos propenso a errores
+ * - Soporte para facturas normales, simplificadas y packing slips
  * 
  * @package SchoolManagement\Orders
  * @since 1.0.0
@@ -28,6 +29,7 @@ class TeacherPdfRestrictionsManager
      */
     private const RESTRICTED_DOCUMENT_TYPES = [
         'invoice',
+        'simplified-invoice',
         'packing-slip'
     ];
 
@@ -279,6 +281,7 @@ class TeacherPdfRestrictionsManager
     {
         $mapping = [
             'invoice' => 'invoice',
+            'simplified-invoice' => 'simplified-invoice',
             'packing-slip' => 'packing-slip'
         ];
 
@@ -295,6 +298,7 @@ class TeacherPdfRestrictionsManager
     {
         $names = [
             'invoice' => __('invoices', 'neve-child'),
+            'simplified-invoice' => __('simplified invoices', 'neve-child'),
             'packing-slip' => __('packing slips', 'neve-child')
         ];
 

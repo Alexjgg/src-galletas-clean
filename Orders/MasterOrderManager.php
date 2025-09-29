@@ -487,7 +487,9 @@ class MasterOrderManager
 
         // Recalcular totales
         $master_order->calculate_totals();
-        $master_order->save();
+        
+        // NUEVO: Ordenar productos por ID para mantener orden consistente
+        $this->sortMasterOrderItemsByProductId($master_order);
 
         // Actualizar lista de pedidos incluidos DESPUÉS de agregar items exitosamente
         $included_orders[] = $order_id;
@@ -513,6 +515,103 @@ class MasterOrderManager
             }
         }
         return null;
+    }
+
+    /**
+     * Ordenar productos de la master order por ID de producto
+     * Esto garantiza que los productos aparezcan siempre en el mismo orden (#01, #02, #03, etc.)
+     */
+    private function sortMasterOrderItemsByProductId(\WC_Order $master_order): void
+    {
+        $items = $master_order->get_items();
+        if (empty($items)) {
+            return;
+        }
+
+        // Crear array con items y sus IDs de producto para ordenamiento
+        $items_with_product_id = [];
+        foreach ($items as $item_id => $item) {
+            if (!is_a($item, 'WC_Order_Item_Product')) {
+                continue;
+            }
+            
+            $product_id = $item->get_product_id();
+            $items_with_product_id[] = [
+                'item_id' => $item_id,
+                'item' => $item,
+                'product_id' => $product_id,
+                'sort_key' => $product_id // Ordenar por product_id
+            ];
+        }
+
+        // Si no hay productos válidos, salir
+        if (empty($items_with_product_id)) {
+            return;
+        }
+
+        // Ordenar por product_id (ascendente)
+        usort($items_with_product_id, function($a, $b) {
+            return $a['sort_key'] <=> $b['sort_key'];
+        });
+
+        // Reordenar los items en la master order
+        // 1. Remover todos los items existentes (guardando sus datos)
+        $items_data = [];
+        foreach ($items_with_product_id as $item_info) {
+            $item = $item_info['item'];
+            $items_data[] = [
+                'product_id' => $item->get_product_id(),
+                'variation_id' => $item->get_variation_id(),
+                'quantity' => $item->get_quantity(),
+                'subtotal' => $item->get_subtotal(),
+                'total' => $item->get_total(),
+                'meta_data' => $item->get_meta_data(),
+                'name' => $item->get_name()
+            ];
+            
+            // Remover el item actual
+            $master_order->remove_item($item_info['item_id']);
+        }
+
+        // 2. Agregar los items en el orden correcto
+        foreach ($items_data as $item_data) {
+            $product = wc_get_product($item_data['product_id']);
+            if (!$product) {
+                continue;
+            }
+
+            $args = [
+                'totals' => [
+                    'subtotal' => $item_data['subtotal'],
+                    'total' => $item_data['total'],
+                ]
+            ];
+
+            if ($item_data['variation_id']) {
+                $args['variation'] = wc_get_product($item_data['variation_id']);
+            }
+
+            $new_item_id = $master_order->add_product(
+                $product,
+                $item_data['quantity'],
+                $args
+            );
+
+            // Restaurar metadatos si existen
+            if ($new_item_id && !empty($item_data['meta_data'])) {
+                $new_item = $master_order->get_item($new_item_id);
+                if ($new_item) {
+                    foreach ($item_data['meta_data'] as $meta) {
+                        $new_item->add_meta_data($meta->key, $meta->value);
+                    }
+                    $new_item->save();
+                }
+            }
+        }
+
+        // Recalcular totales después de reordenar
+        $master_order->calculate_totals();
+        $master_order->save();
     }
 
     /**
@@ -587,8 +686,13 @@ class MasterOrderManager
     /**
      * Agregar estados a la lista de estados de WooCommerce
      */
-    public function addMasterOrderStatuses(array $order_statuses): array
+    public function addMasterOrderStatuses($order_statuses): array
     {
+        // Si no es array (puede venir false desde reportes), inicializar como array vacío
+        if (!is_array($order_statuses)) {
+            $order_statuses = [];
+        }
+        
         $order_statuses['wc-' . self::MASTER_ORDER_STATUS] = __('Master Validated', 'neve-child');
         $order_statuses['wc-' . self::MASTER_ORDER_COMPLETE_STATUS] = __('Master Complete', 'neve-child');
         return $order_statuses;
@@ -1604,7 +1708,9 @@ class MasterOrderManager
 
             // PASO 4: Recalcular totales y guardar
             $master_order->calculate_totals();
-            $master_order->save();
+            
+            // NUEVO: Ordenar productos por ID para mantener orden consistente
+            $this->sortMasterOrderItemsByProductId($master_order);
 
             return [
                 'success' => true,
