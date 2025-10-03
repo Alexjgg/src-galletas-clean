@@ -98,9 +98,9 @@ class OrderManagerRoleManager
     {
         // FORZAR RECREACIÓN DEL ROL (igual que teacher)
         // Primero eliminamos el rol si existe para forzar actualización
-        // if (get_role('order_manager')) {
-        //     remove_role('order_manager');
-        // }
+        if (get_role('order_manager')) {
+            remove_role('order_manager');
+        }
 
         // Crear el rol order_manager con capacidades IDÉNTICAS a teacher
         add_role(
@@ -199,8 +199,8 @@ class OrderManagerRoleManager
     }
 
     /**
-     * COPIA EXACTA de restrict_teacher_shop_order_access() del TeacherRoleManager
-     * Restringe SOLO el acceso a pedidos individuales, NO al admin/listado
+     * Restringe el acceso a TODOS los pedidos (maestros e individuales) para order managers
+     * Order managers solo pueden ver el listado y usar bulk actions, NO editar pedidos
      */
     function restrict_shop_manager_shop_order_access()
     {
@@ -224,19 +224,13 @@ class OrderManagerRoleManager
                 exit;
             }
 
-            // BLOQUEAR: Editar/ver pedido individual existente
+            // BLOQUEAR: Editar/ver CUALQUIER pedido (individual O maestro)
             if ($pagenow == 'post.php' && $post_id > 0) {
                 $post = get_post($post_id);
                 if ($post && $post->post_type === 'shop_order') {
-                    // 🎯 NUEVO: Verificar si NO es master order y bloquear pedidos individuales
-                    $order = wc_get_order($post_id);
-                    if ($order && $order->get_meta('_is_master_order') !== 'yes') {
-                        wp_redirect(admin_url('edit.php?post_type=shop_order&individual_order_access_denied=1'));
-                        exit;
-                    }
-                    
-                    // Si es master order, permitir acceso (no hacer nada)
-                    // Los master orders SÍ son accesibles para order managers
+                    // 🚫 BLOQUEAR TODOS LOS PEDIDOS - Order managers NO pueden editar ningún pedido
+                    wp_redirect(admin_url('edit.php?post_type=shop_order&order_edit_access_denied=1'));
+                    exit;
                 }
             }
         }
@@ -247,17 +241,11 @@ class OrderManagerRoleManager
             $action = isset($_GET['action']) ? $_GET['action'] : '';
             $order_id = isset($_GET['id']) ? (int) $_GET['id'] : 0;
 
-            // BLOQUEAR: Acceso a pedido individual en HPOS
+            // BLOQUEAR: Acceso a CUALQUIER pedido en HPOS (individual O maestro)
             if ($page === 'wc-orders' && $action === 'edit' && $order_id > 0) {
-                // 🎯 NUEVO: Verificar si NO es master order y bloquear pedidos individuales
-                $order = wc_get_order($order_id);
-                if ($order && $order->get_meta('_is_master_order') !== 'yes') {
-                    wp_redirect(admin_url('admin.php?page=wc-orders&individual_order_access_denied=1'));
-                    exit;
-                }
-                
-                // Si es master order, permitir acceso (no hacer nada)
-                // Los master orders SÍ son accesibles para order managers
+                // 🚫 BLOQUEAR TODOS LOS PEDIDOS - Order managers NO pueden editar ningún pedido
+                wp_redirect(admin_url('admin.php?page=wc-orders&order_edit_access_denied=1'));
+                exit;
             }
 
             // BLOQUEAR: Crear nuevo pedido en HPOS
@@ -780,6 +768,10 @@ class OrderManagerRoleManager
             echo '</div>';
         }
 
+        // 🚫 NUEVO: Mensaje para acceso denegado a edición de pedidos (maestros e individuales)
+        if (isset($_GET['order_edit_access_denied'])) {
+        }
+
         // Mensaje para bulk actions denegadas (específicamente pagos y PDFs)
         if (isset($_GET['bulk_action_denied'])) {
             $denied_action = isset($_GET['denied_action']) ? sanitize_text_field($_GET['denied_action']) : 'unknown';
@@ -818,7 +810,7 @@ class OrderManagerRoleManager
             return $actions;
         }
 
-        // Acciones específicamente PROHIBIDAS para order managers (facturas, pagos Y cambios de estado)
+        // Acciones específicamente PROHIBIDAS para order managers (facturas, pagos Y cambios de estado individuales)
         $forbidden_actions = array(
             'mark_bank_transfers_paid',   // 💰 Mark orders as paid
             'mark_bank_transfers_unpaid', // ❌ Mark orders as unpaid
@@ -830,9 +822,21 @@ class OrderManagerRoleManager
             'simplified-invoice',         // 🚫 PDF Factura Simplificada
             'exchange-invoice',           // 🚫 PDF Factura de Canje
             'simplified-credit-note',     // 🚫 PDF Factura Rectificativa Simplificada
-            'mark_processing',            // 🚫 Cambiar a Processing
-            'mark_on-hold'                // 🚫 Cambiar a En Espera
+            
+            // 🚫 ESTADOS INDIVIDUALES - No aplicables a Master Orders
+            'mark_processing',            // 🚫 Cambiar a Processing (individual)
+            'mark_on-hold',               // 🚫 Cambiar a En Espera (individual)
+            'mark_completed',             // 🚫 Cambiar a Completed (individual)
+            'mark_warehouse',             // 🚫 Cambiar a Warehouse/Almacén (individual)
+            'mark_prepared',              // 🚫 Cambiar a Prepared/Preparado (individual)
+            'mark_cancelled',             // 🚫 Cambiar a Cancelled (individual)
+            'mark_refunded',              // 🚫 Cambiar a Refunded (individual)
+            'mark_failed',                // 🚫 Cambiar a Failed (individual)
+            'mark_shipped',               // 🚫 Cambiar estado a Preparado (individual)
+            'mark_reviewed',              // 🚫 Marcar como revisado (individual)
+            'trash',                      // 🚫 Mover a papelera (no aplicable a master orders)
             // NOTA: 'packing-slip' NO está aquí - Los order managers SÍ pueden generar albaranes
+            // NOTA: Los estados MASTER (mast-warehs, mast-prepared, etc.) SÍ están permitidos
         );
 
         // Remover solo las acciones prohibidas, mantener todas las demás incluyendo packing-slip
@@ -854,7 +858,7 @@ class OrderManagerRoleManager
             return $redirect_url;
         }
 
-        // Acciones específicamente PROHIBIDAS para order managers (facturas, pagos Y cambios de estado)
+        // Acciones específicamente PROHIBIDAS para order managers (facturas, pagos Y cambios de estado individuales)
         $forbidden_actions = array(
             'mark_bank_transfers_paid',   // 💰 Mark orders as paid
             'mark_bank_transfers_unpaid', // ❌ Mark orders as unpaid
@@ -866,9 +870,21 @@ class OrderManagerRoleManager
             'simplified-invoice',         // 🚫 PDF Factura Simplificada
             'exchange-invoice',           // 🚫 PDF Factura de Canje
             'simplified-credit-note',     // 🚫 PDF Factura Rectificativa Simplificada
-            'mark_processing',            // 🚫 Cambiar a Processing
-            'mark_on-hold'                // 🚫 Cambiar a En Espera
+            
+            // 🚫 ESTADOS INDIVIDUALES - No aplicables a Master Orders
+            'mark_processing',            // 🚫 Cambiar a Processing (individual)
+            'mark_on-hold',               // 🚫 Cambiar a En Espera (individual)
+            'mark_completed',             // 🚫 Cambiar a Completed (individual)
+            'mark_warehouse',             // 🚫 Cambiar a Warehouse/Almacén (individual)
+            'mark_prepared',              // 🚫 Cambiar a Prepared/Preparado (individual)
+            'mark_cancelled',             // 🚫 Cambiar a Cancelled (individual)
+            'mark_refunded',              // 🚫 Cambiar a Refunded (individual)
+            'mark_failed',                // 🚫 Cambiar a Failed (individual)
+            'mark_shipped',               // 🚫 Cambiar estado a Preparado (individual)
+            'mark_reviewed',              // 🚫 Marcar como revisado (individual)
+            'trash',                      // 🚫 Mover a papelera (no aplicable a master orders)
             // NOTA: 'packing-slip' NO está aquí - Los order managers SÍ pueden generar albaranes
+            // NOTA: Los estados MASTER (mast-warehs, mast-prepared, etc.) SÍ están permitidos
         );
 
         // Solo bloquear las acciones prohibidas
@@ -910,7 +926,7 @@ class OrderManagerRoleManager
             $action = $_POST['action2'];
         }
 
-        // Acciones específicamente PROHIBIDAS para order managers (SOLO facturas y pagos)
+        // Acciones específicamente PROHIBIDAS para order managers (facturas, pagos Y estados individuales)
         $forbidden_actions = array(
             'mark_bank_transfers_paid',   // 💰 Mark orders as paid
             'mark_bank_transfers_unpaid', // ❌ Mark orders as unpaid
@@ -918,7 +934,20 @@ class OrderManagerRoleManager
             'receipt',                    // PDF Recibo
             'credit-note',                // PDF Nota de crédito
             'proforma',                   // PDF Proforma
-            'delivery-note'               // PDF Nota de entrega
+            'delivery-note',              // PDF Nota de entrega
+            
+            // 🚫 ESTADOS INDIVIDUALES - No aplicables a Master Orders
+            'mark_processing',            // 🚫 Cambiar a Processing (individual)
+            'mark_on-hold',               // 🚫 Cambiar a En Espera (individual)
+            'mark_completed',             // 🚫 Cambiar a Completed (individual)
+            'mark_warehouse',             // 🚫 Cambiar a Warehouse/Almacén (individual)
+            'mark_prepared',              // 🚫 Cambiar a Prepared/Preparado (individual)
+            'mark_cancelled',             // 🚫 Cambiar a Cancelled (individual)
+            'mark_refunded',              // 🚫 Cambiar a Refunded (individual)
+            'mark_failed',                // 🚫 Cambiar a Failed (individual)
+            'mark_shipped',               // 🚫 Cambiar estado a Preparado (individual)
+            'mark_reviewed',              // 🚫 Marcar como revisado (individual)
+            'trash',                      // 🚫 Mover a papelera (no aplicable a master orders)
             // NOTA: 'packing-slip' NO está aquí - Los order managers SÍ pueden generar albaranes
         );
 
@@ -967,7 +996,7 @@ class OrderManagerRoleManager
             return;
         }
 
-        // Verificar parámetros en la URL que indiquen acciones prohibidas (SOLO facturas y pagos)
+        // Verificar parámetros en la URL que indiquen acciones prohibidas (facturas, pagos Y estados individuales)
         $forbidden_url_params = array(
             'mark_bank_transfers_paid',
             'mark_bank_transfers_unpaid', 
@@ -975,7 +1004,20 @@ class OrderManagerRoleManager
             'receipt',                    // PDF Recibo
             'credit-note',                // PDF Nota de crédito
             'proforma',                   // PDF Proforma
-            'delivery-note'               // PDF Nota de entrega
+            'delivery-note',              // PDF Nota de entrega
+            
+            // 🚫 ESTADOS INDIVIDUALES - No aplicables a Master Orders
+            'mark_processing',            // 🚫 Cambiar a Processing (individual)
+            'mark_on-hold',               // 🚫 Cambiar a En Espera (individual)
+            'mark_completed',             // 🚫 Cambiar a Completed (individual)
+            'mark_warehouse',             // 🚫 Cambiar a Warehouse/Almacén (individual)
+            'mark_prepared',              // 🚫 Cambiar a Prepared/Preparado (individual)
+            'mark_cancelled',             // 🚫 Cambiar a Cancelled (individual)
+            'mark_refunded',              // 🚫 Cambiar a Refunded (individual)
+            'mark_failed',                // 🚫 Cambiar a Failed (individual)
+            'mark_shipped',               // 🚫 Marcar como enviado (individual)
+            'mark_reviewed',              // 🚫 Marcar como revisado (individual)
+            'trash'                       // 🚫 Mover a papelera (individual)
             // NOTA: 'packing-slip' NO está aquí - Los order managers SÍ pueden usar albaranes
             // NOTA: 'wpo_wcpdf_generate_pdf' se evalúa caso por caso abajo
         );
@@ -1037,7 +1079,7 @@ class OrderManagerRoleManager
             if (isset($_GET['bulk_action'])) $actions_to_check[] = $_GET['bulk_action'];
             if (isset($_GET['action2'])) $actions_to_check[] = $_GET['action2'];
 
-            // Acciones específicamente PROHIBIDAS para order managers (SOLO facturas y pagos)
+            // Acciones específicamente PROHIBIDAS para order managers (facturas, pagos Y estados individuales)
             $forbidden_actions = array(
                 'mark_bank_transfers_paid',
                 'mark_bank_transfers_unpaid',
@@ -1045,7 +1087,20 @@ class OrderManagerRoleManager
                 'receipt',                    // PDF Recibo
                 'credit-note',                // PDF Nota de crédito
                 'proforma',                   // PDF Proforma
-                'delivery-note'               // PDF Nota de entrega
+                'delivery-note',              // PDF Nota de entrega
+                
+                // 🚫 ESTADOS INDIVIDUALES - No aplicables a Master Orders
+                'mark_processing',            // 🚫 Cambiar a Processing (individual)
+                'mark_on-hold',               // 🚫 Cambiar a En Espera (individual)
+                'mark_completed',             // 🚫 Cambiar a Completed (individual)
+                'mark_warehouse',             // 🚫 Cambiar a Warehouse/Almacén (individual)
+                'mark_prepared',              // 🚫 Cambiar a Prepared/Preparado (individual)
+                'mark_cancelled',             // 🚫 Cambiar a Cancelled (individual)
+                'mark_refunded',              // 🚫 Cambiar a Refunded (individual)
+                'mark_failed',                // 🚫 Cambiar a Failed (individual)
+                'mark_shipped',               // 🚫 Marcar como enviado (individual)
+                'mark_reviewed',              // 🚫 Marcar como revisado (individual)
+                'trash'                       // 🚫 Mover a papelera (individual)
                 // NOTA: 'packing-slip' NO está aquí - Los order managers SÍ pueden usar albaranes
             );
 
