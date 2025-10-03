@@ -239,10 +239,15 @@ class MasterOrderPackingSlips
                 return;
             }
 
-            // Cambiar estado del pedido maestro a "Master Warehouse" solo si no está completado
-            if ($current_master_status !== 'mast-warehs') {
+            // Cambiar estado del pedido maestro a "Master Warehouse" solo si no está completado ni preparado
+            // IMPORTANTE: No cambiar si ya está en "preparado" (mast-prepared)
+            if ($current_master_status !== 'mast-warehs' && $current_master_status !== 'mast-prepared') {
                 $master_order->update_status('mast-warehs', 
                     __('Status automatically changed to Master Warehouse after generating combined packing slip PDF', 'neve-child')
+                );
+            } else if ($current_master_status === 'mast-prepared') {
+                $master_order->add_order_note(
+                    __('Combined packing slip PDF generated. Master order remains in "Prepared" status - no status change applied', 'neve-child')
                 );
             }
 
