@@ -27,6 +27,9 @@ class OrderManagerRoleManager
         add_filter('woocommerce_disable_admin_bar', array($this, 'shop_manager_allow_admin_to_role'));
         add_action('wp_dashboard_setup', array($this, 'shop_manager_dashboard_widgets'), 999);
 
+        // 🎯 NUEVO: Filtrar pedidos - Order Managers SOLO ven Master Orders
+        add_filter('woocommerce_order_list_table_prepare_items_query_args', array($this, 'filter_orders_to_master_only'), 10);
+        add_filter('woocommerce_reports_get_order_report_query', array($this, 'filter_order_reports_to_master_only'));
 
         // Restringir acceso a pedidos individuales
         add_action('admin_init', array($this, 'restrict_shop_manager_shop_order_access'));
@@ -140,6 +143,62 @@ class OrderManagerRoleManager
     }
 
     /**
+     * 🎯 NUEVO: Filtra los pedidos para mostrar SOLO Master Orders a los Order Managers
+     * OPUESTO al TeacherRoleManager - Los Order Managers SOLO ven pedidos maestros
+     */
+    function filter_orders_to_master_only($query_args)
+    {
+        // Solo aplicamos filtro para order managers
+        if (!$this->is_user('order_manager') || is_super_admin(get_current_user_id())) {
+            return $query_args;
+        }
+
+        // Inicializar meta_query si no existe
+        if (!isset($query_args['meta_query'])) {
+            $query_args['meta_query'] = [];
+        }
+
+        // Configurar relación AND para múltiples condiciones meta si hay más de una
+        if (count($query_args['meta_query']) > 0) {
+            $query_args['meta_query']['relation'] = 'AND';
+        }
+
+        // 🎯 MOSTRAR SOLO Master Orders - Los Order Managers solo ven pedidos maestros
+        $query_args['meta_query'][] = [
+            'key' => '_is_master_order',
+            'value' => 'yes',
+            'compare' => '='
+        ];
+
+        return $query_args;
+    }
+
+    /**
+     * 🎯 NUEVO: Filtra los reportes para mostrar SOLO Master Orders a los Order Managers
+     * OPUESTO al TeacherRoleManager - Los reportes solo incluyen pedidos maestros
+     */
+    function filter_order_reports_to_master_only($query)
+    {
+        // Solo aplicamos filtro para order managers
+        if (!$this->is_user('order_manager') || is_super_admin(get_current_user_id())) {
+            return $query;
+        }
+
+        // Añadimos condición para filtrar SOLO master orders en reportes
+        global $wpdb;
+
+        if (isset($query['where']) && is_string($query['where'])) {
+            $query['where'] .= " AND meta__master_order.meta_key = '_is_master_order' AND meta__master_order.meta_value = 'yes'";
+
+            if (!strstr($query['join'], 'meta__master_order')) {
+                $query['join'] .= " LEFT JOIN {$wpdb->prefix}postmeta meta__master_order ON posts.ID = meta__master_order.post_id";
+            }
+        }
+
+        return $query;
+    }
+
+    /**
      * COPIA EXACTA de restrict_teacher_shop_order_access() del TeacherRoleManager
      * Restringe SOLO el acceso a pedidos individuales, NO al admin/listado
      */
@@ -169,9 +228,15 @@ class OrderManagerRoleManager
             if ($pagenow == 'post.php' && $post_id > 0) {
                 $post = get_post($post_id);
                 if ($post && $post->post_type === 'shop_order') {
-                    // Es un pedido individual - BLOQUEAR
-                    wp_redirect(admin_url('edit.php?post_type=shop_order&individual_access_denied=1'));
-                    exit;
+                    // 🎯 NUEVO: Verificar si NO es master order y bloquear pedidos individuales
+                    $order = wc_get_order($post_id);
+                    if ($order && $order->get_meta('_is_master_order') !== 'yes') {
+                        wp_redirect(admin_url('edit.php?post_type=shop_order&individual_order_access_denied=1'));
+                        exit;
+                    }
+                    
+                    // Si es master order, permitir acceso (no hacer nada)
+                    // Los master orders SÍ son accesibles para order managers
                 }
             }
         }
@@ -184,9 +249,15 @@ class OrderManagerRoleManager
 
             // BLOQUEAR: Acceso a pedido individual en HPOS
             if ($page === 'wc-orders' && $action === 'edit' && $order_id > 0) {
-                // Es un pedido individual en sistema HPOS - BLOQUEAR
-                wp_redirect(admin_url('admin.php?page=wc-orders&individual_access_denied=1'));
-                exit;
+                // 🎯 NUEVO: Verificar si NO es master order y bloquear pedidos individuales
+                $order = wc_get_order($order_id);
+                if ($order && $order->get_meta('_is_master_order') !== 'yes') {
+                    wp_redirect(admin_url('admin.php?page=wc-orders&individual_order_access_denied=1'));
+                    exit;
+                }
+                
+                // Si es master order, permitir acceso (no hacer nada)
+                // Los master orders SÍ son accesibles para order managers
             }
 
             // BLOQUEAR: Crear nuevo pedido en HPOS
@@ -698,6 +769,14 @@ class OrderManagerRoleManager
             echo '<div class="notice notice-error is-dismissible">';
             echo '<p><strong>' . __('Individual Order Access Denied', 'neve-child') . '</strong></p>';
             echo '<p>' . __('Order managers cannot access individual order details. You can only view the orders list and use bulk actions.', 'neve-child') . '</p>';
+            echo '</div>';
+        }
+
+        // 🎯 NUEVO: Mensaje específico para pedidos individuales (no master orders) bloqueados
+        if (isset($_GET['individual_order_access_denied'])) {
+            echo '<div class="notice notice-error is-dismissible">';
+            echo '<p><strong>' . __('Individual Order Access Denied', 'neve-child') . '</strong></p>';
+            echo '<p>' . __('Order managers can only access Master Orders. Individual orders are not accessible for your role. You can only view and manage Master Orders through the orders list.', 'neve-child') . '</p>';
             echo '</div>';
         }
 
