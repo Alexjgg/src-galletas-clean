@@ -525,9 +525,17 @@ class OrderManagerRoleManager
         .wc_actions a[href*="document_type=credit-note"],
         .wc_actions a[href*="document_type=proforma"],
         .wc_actions a[href*="document_type=delivery-note"],
+        .wc_actions a[href*="document_type=simplified-invoice"],
+        .wc_actions a[href*="document_type=exchange-invoice"],
+        .wc_actions a[href*="document_type=simplified-credit-note"],
         .column-wc_actions a[class*="invoice"],
+        .column-wc_actions a[class*="simplified-invoice"],
+        .column-wc_actions a[class*="exchange-invoice"],
+        .column-wc_actions a[class*="simplified-credit-note"],
         .column-wc_actions a[alt*="Invoice"],
-        .column-wc_actions a[alt*="Factura"] {
+        .column-wc_actions a[alt*="Factura"],
+        .column-wc_actions a[alt*="Simplified Credit Note"],
+        .column-wc_actions a[alt*="Credit Note"] {
             display: none !important;
         }
 
@@ -545,7 +553,10 @@ class OrderManagerRoleManager
         .button.wpo_wcpdf.receipt.pdf,
         .button.wpo_wcpdf.credit-note.pdf,
         .button.wpo_wcpdf.proforma.pdf,
-        .button.wpo_wcpdf.delivery-note.pdf {
+        .button.wpo_wcpdf.delivery-note.pdf,
+        .button.wpo_wcpdf.simplified-invoice.pdf,
+        .button.wpo_wcpdf.exchange-invoice.pdf,
+        .button.wpo_wcpdf.simplified-credit-note.pdf {
             display: none !important;
         }
 
@@ -614,13 +625,21 @@ class OrderManagerRoleManager
             $('.column-wc_actions a[href*="document_type=credit-note"]').remove();
             $('.column-wc_actions a[href*="document_type=proforma"]').remove();
             $('.column-wc_actions a[href*="document_type=delivery-note"]').remove();
+            $('.column-wc_actions a[href*="document_type=simplified-invoice"]').remove();
+            $('.column-wc_actions a[href*="document_type=exchange-invoice"]').remove();
+            $('.column-wc_actions a[href*="document_type=simplified-credit-note"]').remove();
             $('.column-wc_actions a[alt*="Invoice"]').remove();
             $('.column-wc_actions a[alt*="Factura"]').remove();
+            $('.column-wc_actions a[alt*="Simplified Credit Note"]').remove();
+            $('.column-wc_actions a[alt*="Credit Note"]').remove();
             $('.button.wpo_wcpdf.invoice.pdf').remove();
             $('.button.wpo_wcpdf.receipt.pdf').remove();
             $('.button.wpo_wcpdf.credit-note.pdf').remove();
             $('.button.wpo_wcpdf.proforma.pdf').remove();
             $('.button.wpo_wcpdf.delivery-note.pdf').remove();
+            $('.button.wpo_wcpdf.simplified-invoice.pdf').remove();
+            $('.button.wpo_wcpdf.exchange-invoice.pdf').remove();
+            $('.button.wpo_wcpdf.simplified-credit-note.pdf').remove();
             
             // Verificación adicional para elementos PDF de facturas que se carguen dinámicamente
             setInterval(function() {
@@ -630,8 +649,13 @@ class OrderManagerRoleManager
                 $('.column-wc_actions a[href*="document_type=credit-note"]').remove();
                 $('.column-wc_actions a[href*="document_type=proforma"]').remove();
                 $('.column-wc_actions a[href*="document_type=delivery-note"]').remove();
+                $('.column-wc_actions a[href*="document_type=simplified-invoice"]').remove();
+                $('.column-wc_actions a[href*="document_type=exchange-invoice"]').remove();
+                $('.column-wc_actions a[href*="document_type=simplified-credit-note"]').remove();
                 $('.column-wc_actions a[alt*="Invoice"]').remove();
                 $('.column-wc_actions a[alt*="Factura"]').remove();
+                $('.column-wc_actions a[alt*="Simplified Credit Note"]').remove();
+                $('.column-wc_actions a[alt*="Credit Note"]').remove();
                 // NOTA: NO remover packing-slip - Los order managers SÍ pueden usar albaranes
             }, 1000); // Verificar cada segundo
 
@@ -715,7 +739,7 @@ class OrderManagerRoleManager
             return $actions;
         }
 
-        // Acciones específicamente PROHIBIDAS para order managers (SOLO facturas y pagos)
+        // Acciones específicamente PROHIBIDAS para order managers (facturas, pagos Y cambios de estado)
         $forbidden_actions = array(
             'mark_bank_transfers_paid',   // 💰 Mark orders as paid
             'mark_bank_transfers_unpaid', // ❌ Mark orders as unpaid
@@ -723,7 +747,12 @@ class OrderManagerRoleManager
             'receipt',                    // PDF Recibo
             'credit-note',                // PDF Nota de crédito
             'proforma',                   // PDF Proforma
-            'delivery-note'               // PDF Nota de entrega
+            'delivery-note',              // PDF Nota de entrega
+            'simplified-invoice',         // 🚫 PDF Factura Simplificada
+            'exchange-invoice',           // 🚫 PDF Factura de Canje
+            'simplified-credit-note',     // 🚫 PDF Factura Rectificativa Simplificada
+            'mark_processing',            // 🚫 Cambiar a Processing
+            'mark_on-hold'                // 🚫 Cambiar a En Espera
             // NOTA: 'packing-slip' NO está aquí - Los order managers SÍ pueden generar albaranes
         );
 
@@ -736,8 +765,8 @@ class OrderManagerRoleManager
     }
 
     /**
-     * Intercepta el procesamiento de bulk actions para order managers - BLOQUEA solo pagos y facturas PDF
-     * PERMITE albaranes (packing-slip) pero NO facturas (invoice) ni pagos
+     * Intercepta el procesamiento de bulk actions para order managers - BLOQUEA pagos, facturas PDF Y cambios de estado
+     * PERMITE albaranes (packing-slip) pero NO facturas (invoice), pagos ni cambios a processing/on-hold
      */
     public function intercept_shop_manager_bulk_actions($redirect_url, $action, $post_ids)
     {
@@ -746,7 +775,7 @@ class OrderManagerRoleManager
             return $redirect_url;
         }
 
-        // Acciones específicamente PROHIBIDAS para order managers (SOLO facturas y pagos)
+        // Acciones específicamente PROHIBIDAS para order managers (facturas, pagos Y cambios de estado)
         $forbidden_actions = array(
             'mark_bank_transfers_paid',   // 💰 Mark orders as paid
             'mark_bank_transfers_unpaid', // ❌ Mark orders as unpaid
@@ -754,7 +783,12 @@ class OrderManagerRoleManager
             'receipt',                    // PDF Recibo
             'credit-note',                // PDF Nota de crédito
             'proforma',                   // PDF Proforma
-            'delivery-note'               // PDF Nota de entrega
+            'delivery-note',              // PDF Nota de entrega
+            'simplified-invoice',         // 🚫 PDF Factura Simplificada
+            'exchange-invoice',           // 🚫 PDF Factura de Canje
+            'simplified-credit-note',     // 🚫 PDF Factura Rectificativa Simplificada
+            'mark_processing',            // 🚫 Cambiar a Processing
+            'mark_on-hold'                // 🚫 Cambiar a En Espera
             // NOTA: 'packing-slip' NO está aquí - Los order managers SÍ pueden generar albaranes
         );
 
@@ -885,7 +919,7 @@ class OrderManagerRoleManager
             $document_type = isset($_GET['document_type']) ? $_GET['document_type'] : '';
             
             // Solo bloquear si es para generar facturas, permitir albaranes
-            if (in_array($document_type, ['invoice', 'receipt', 'credit-note', 'proforma', 'delivery-note'])) {
+            if (in_array($document_type, ['invoice', 'receipt', 'credit-note', 'proforma', 'delivery-note', 'simplified-invoice', 'exchange-invoice', 'simplified-credit-note'])) {
                 wp_redirect(admin_url('edit.php?post_type=shop_order&bulk_action_denied=1&denied_action=pdf_invoice_blocked'));
                 exit;
             }
@@ -948,7 +982,7 @@ class OrderManagerRoleManager
                 $document_type = isset($_GET['document_type']) ? $_GET['document_type'] : '';
                 
                 // Solo bloquear si es para generar facturas, permitir albaranes
-                if (in_array($document_type, ['invoice', 'receipt', 'credit-note', 'proforma', 'delivery-note'])) {
+                if (in_array($document_type, ['invoice', 'receipt', 'credit-note', 'proforma', 'delivery-note', 'simplified-invoice', 'exchange-invoice', 'simplified-credit-note'])) {
                     wp_redirect(admin_url('edit.php?post_type=shop_order&bulk_action_denied=1&denied_action=pdf_invoice_blocked'));
                     exit;
                 }
@@ -960,7 +994,7 @@ class OrderManagerRoleManager
             $document_type = isset($_GET['document_type']) ? $_GET['document_type'] : '';
             
             // Solo bloquear descargas de facturas, permitir albaranes
-            if (empty($document_type) || in_array($document_type, ['invoice', 'receipt', 'credit-note', 'proforma', 'delivery-note'])) {
+            if (empty($document_type) || in_array($document_type, ['invoice', 'receipt', 'credit-note', 'proforma', 'delivery-note', 'simplified-invoice', 'exchange-invoice', 'simplified-credit-note'])) {
                 wp_redirect(admin_url('edit.php?post_type=shop_order&bulk_action_denied=1&denied_action=pdf_access'));
                 exit;
             }

@@ -36,7 +36,7 @@ class UserAdminColumnsManager
         add_action('pre_get_users', [$this, 'handleCustomColumnsSorting']);
 
         // Filtros avanzados en el admin de usuarios - PRIORIDAD ALTA para ejecutar después del TeacherRoleManager
-        add_action('restrict_manage_users', [$this, 'addAdvancedFiltersToUsersList']);
+        add_action('manage_users_extra_tablenav', [$this, 'addAdvancedFiltersToUsersList']);
         add_action('pre_get_users', [$this, 'handleAdvancedFilters'], 20); // Prioridad 20 > 10 (default)
 
         // AJAX para búsquedas dinámicas
@@ -205,14 +205,9 @@ class UserAdminColumnsManager
      */
     private function getUserIncomingTotalColumn(int $user_id): string
     {
-        // Obtener el total MSRP acumulado
-        $msrp_total = (float) get_user_meta($user_id, '_user_msrp_total', true);
-        
-        // Obtener el total sales de la función que ya lo calcula (reutilizar lógica)
-        $total_sales = $this->calculateUserTotalSales($user_id);
-        
-        // Calcular incoming: MSRP (precio de venta) - Total Sales (precio web) = Beneficio
-        $incoming_total = max(0, $msrp_total - $total_sales);
+        // ✅ CORREGIDO: Leer directamente el valor calculado por MSRPAccumulator
+        // En lugar de recalcular, usar el valor que ya maneja reembolsos correctamente
+        $incoming_total = (float) get_user_meta($user_id, '_user_incoming_total', true);
         
         if ($incoming_total <= 0) {
             return '<span style="color: #999;">€0.00</span>';
@@ -221,13 +216,8 @@ class UserAdminColumnsManager
         // Formatear el número con símbolo de euro
         $formatted_amount = number_format($incoming_total, 2, ',', '.') . ' €';
         
-        // Determinar el color basado en la cantidad
-        $color = '#2271b1'; // Azul por defecto
-        if ($incoming_total >= 1000) {
-            $color = '#00a32a'; // Verde para cantidades altas
-        } elseif ($incoming_total >= 500) {
-            $color = '#d63638'; // Rojo para cantidades medias-altas
-        }
+        // Usar siempre color azul por defecto
+        $color = '#2271b1';
         
         return '<strong style="color: ' . $color . ';">' . esc_html($formatted_amount) . '</strong>';
     }
@@ -336,77 +326,79 @@ class UserAdminColumnsManager
     /**
      * Add advanced filters to users list
      */
-    public function addAdvancedFiltersToUsersList(): void
+    public function addAdvancedFiltersToUsersList($which): void
     {
+        // Solo mostrar en la parte superior (top)
+        if ($which !== 'top') {
+            return;
+        }
+        
         // Si el usuario es teacher (y no super admin), no mostrar filtros
         if (current_user_can('teacher_role') && !current_user_can('administrator')) {
             return;
         }
 
-        $screen = get_current_screen();
-        if ($screen && $screen->id !== 'users') {
+        $screen = function_exists('get_current_screen') ? get_current_screen() : null;
+        if (!$screen || $screen->id !== 'users') {
             return;
         }
 
+        // ⚠️ NO abrir <form> nuevo. Este hook ya está dentro del form del listado.
+        $selected_school = isset($_GET['filter_school']) ? sanitize_text_field(wp_unslash($_GET['filter_school'])) : '';
+
         echo '<div class="alignleft actions" style="margin-top: 1px;">';
-        
-        // Filtro por colegio
-        $this->renderSchoolFilter();
-        
-        // Filtro por rol
-        $this->renderRoleFilter();
-        
+
+        // Select del filtro de escuelas (asegurar name="filter_school")
+        echo '<label class="screen-reader-text" for="filter_school">' . esc_html__('Filter by school', 'neve-child') . '</label>';
+        echo '<select id="filter_school" name="filter_school" style="min-width: 250px">';
+        echo '<option value="">' . esc_html__('Search schools...', 'neve-child') . '</option>';
+
+        if ($selected_school !== '' && is_numeric($selected_school)) {
+            $school = get_post((int)$selected_school);
+            if ($school && $school->post_status === 'publish') {
+                $province = get_field(Constants::ACF_SCHOOL_PROVINCE, $school->ID);
+                $city = get_field(Constants::ACF_SCHOOL_CITY, $school->ID);
+                $location_parts = array_filter([$city, $province]);
+                $display_text = $school->post_title . (!empty($location_parts) ? ' (' . implode(', ', $location_parts) . ')' : '');
+                echo '<option value="' . esc_attr($selected_school) . '" selected>' . esc_html($display_text) . '</option>';
+            }
+        }
+        echo '</select>';
+
+        // Botón de submit del propio form del listado
+        submit_button(__('Filter', 'neve-child'), 'secondary', 'filter_action', false);
+
+        // Enlace limpiar (quita el parámetro y paginación)
+        if ($selected_school !== '') {
+            $clear_url = remove_query_arg(['filter_school', 'filter_action', 'paged']);
+            echo ' <a class="button" href="' . esc_url($clear_url) . '">' . esc_html__('Clear', 'neve-child') . '</a>';
+            
+            // Mostrar información del filtro activo
+            $user_count = $this->getUserCountBySchool((int)$selected_school);
+            echo '<span class="school-filter-info" style="margin-left: 10px; color: #666; font-size: 12px; font-style: italic;">(' . 
+                 sprintf(_n('%d user found', '%d users found', $user_count, 'neve-child'), $user_count) . 
+                 ')</span>';
+        }
+
         echo '</div>';
     }
 
     /**
-     * Render school filter dropdown
+     * Get user count for a specific school
+     * 
+     * @param int $school_id School ID
+     * @return int User count
      */
-    private function renderSchoolFilter(): void
+    private function getUserCountBySchool(int $school_id): int
     {
-        $selected_school = $_GET['filter_school'] ?? '';
+        $users = get_users([
+            'meta_key' => Constants::USER_META_SCHOOL_ID,
+            'meta_value' => $school_id,
+            'count_total' => true,
+            'fields' => 'ids'
+        ]);
         
-        echo '<select name="filter_school" id="filter_school" style="width: 200px;">';
-        echo '<option value="">' . __('Search school...', 'neve-child') . '</option>';
-        
-        if (!empty($selected_school) && is_numeric($selected_school)) {
-            $school = get_post($selected_school);
-            if ($school) {
-                echo '<option value="' . esc_attr($selected_school) . '" selected>' . esc_html($school->post_title) . '</option>';
-            }
-        }
-        
-        echo '</select>';
-    }
-
-    /**
-     * Render role filter dropdown
-     */
-    private function renderRoleFilter(): void
-    {
-        // No mostrar el filtro de rol si el usuario actual es profesor
-        if (current_user_can('teacher')) {
-            return;
-        }
-        
-        $selected_role = $_GET['filter_role'] ?? '';
-        
-        $roles = [
-            'student' => __('Students', 'neve-child'),
-            'teacher' => __('Teachers', 'neve-child'), 
-            'shop_manager' => __('Shop Managers', 'neve-child'), 
-            'order_manager' => __('Order Managers', 'neve-child')
-        ];
-        
-        echo '<select name="filter_role">';
-        echo '<option value="">' . __('All roles', 'neve-child') . '</option>';
-        
-        foreach ($roles as $role_key => $role_name) {
-            $selected = selected($selected_role, $role_key, false);
-            echo '<option value="' . esc_attr($role_key) . '"' . $selected . '>' . esc_html($role_name) . '</option>';
-        }
-        
-        echo '</select>';
+        return is_array($users) ? count($users) : 0;
     }
 
     /**
@@ -416,25 +408,33 @@ class UserAdminColumnsManager
      */
     public function handleAdvancedFilters(\WP_User_Query $query): void
     {
-        if (!is_admin() || !$query->is_main_query()) {
+        if (!is_admin()) {
             return;
         }
-        
-        $screen = get_current_screen();
+
+        $screen = function_exists('get_current_screen') ? get_current_screen() : null;
         if (!$screen || $screen->id !== 'users') {
             return;
         }
-        
-        // Filtro por colegio
-        $filter_school = $_GET['filter_school'] ?? '';
-        if (!empty($filter_school) && is_numeric($filter_school)) {
-            $query->set('meta_key', Constants::USER_META_SCHOOL_ID);
-            $query->set('meta_value', $filter_school);
+
+        $filter_school = isset($_GET['filter_school']) ? sanitize_text_field(wp_unslash($_GET['filter_school'])) : '';
+
+        if ($filter_school !== '' && is_numeric($filter_school)) {
+            $meta_query = (array) $query->get('meta_query');
+            $meta_query[] = [
+                'key'     => Constants::USER_META_SCHOOL_ID,
+                'value'   => (int) $filter_school,
+                'compare' => '='
+            ];
+            $query->set('meta_query', $meta_query);
+            
+            // (Opcional) Si necesitas compatibilidad con búsquedas y ordenaciones,
+            // no toques otros args; WP se encarga de combinarlos.
         }
-        
-        // Filtro por rol
-        $filter_role = $_GET['filter_role'] ?? '';
-        if (!empty($filter_role)) {
+
+        // Filtro por rol (mantener funcionalidad existente)
+        $filter_role = isset($_GET['filter_role']) ? sanitize_text_field(wp_unslash($_GET['filter_role'])) : '';
+        if ($filter_role !== '') {
             $query->set('role', $filter_role);
         }
     }
@@ -444,36 +444,49 @@ class UserAdminColumnsManager
      */
     public function handleSchoolSearchAdmin(): void
     {
-        if (!current_user_can('manage_options')) {
-            wp_die('Unauthorized');
+        // Verificar nonce
+        if (!wp_verify_nonce($_POST['nonce'] ?? '', 'search_schools_admin')) {
+            wp_die('Security check failed');
         }
         
-        $search_term = sanitize_text_field($_GET['q'] ?? '');
+        // Verificar permisos
+        if (!current_user_can('manage_options') && !current_user_can('list_users')) {
+            wp_die('Insufficient permissions');
+        }
         
-        if (empty($search_term)) {
+        $search_term = sanitize_text_field($_GET['q'] ?? $_POST['q'] ?? '');
+        
+        if (empty($search_term) || strlen($search_term) < 2) {
             wp_send_json([]);
         }
         
-        $schools = get_posts([
-            'post_type' => Constants::POST_TYPE_SCHOOL,
-            'post_status' => 'publish',
-            's' => $search_term,
-            'posts_per_page' => 20
-        ]);
-        
-        $results = [];
-        foreach ($schools as $school) {
-            $province = get_field(Constants::ACF_SCHOOL_PROVINCE, $school->ID);
-            $city = get_field(Constants::ACF_SCHOOL_CITY, $school->ID);
-            $location = implode(', ', array_filter([$city, $province]));
+        try {
+            $schools = get_posts([
+                'post_type' => Constants::POST_TYPE_SCHOOL,
+                'post_status' => 'publish',
+                's' => $search_term,
+                'posts_per_page' => 20,
+                'orderby' => 'title',
+                'order' => 'ASC'
+            ]);
             
-            $results[] = [
-                'id' => $school->ID,
-                'text' => $school->post_title . ($location ? ' (' . $location . ')' : '')
-            ];
+            $results = [];
+            foreach ($schools as $school) {
+                $province = get_field(Constants::ACF_SCHOOL_PROVINCE, $school->ID);
+                $city = get_field(Constants::ACF_SCHOOL_CITY, $school->ID);
+                $location = implode(', ', array_filter([$city, $province]));
+                
+                $results[] = [
+                    'id' => $school->ID,
+                    'text' => $school->post_title . ($location ? ' (' . $location . ')' : '')
+                ];
+            }
+            
+            wp_send_json($results);
+            
+        } catch (Exception $e) {
+            wp_send_json([]);
         }
-        
-        wp_send_json($results);
     }
 
     /**
@@ -548,31 +561,104 @@ class UserAdminColumnsManager
         wp_enqueue_script('select2', 'https://cdn.jsdelivr.net/npm/select2@4.1.0-rc.0/dist/js/select2.min.js', ['jquery'], '4.1.0', true);
         wp_enqueue_style('select2', 'https://cdn.jsdelivr.net/npm/select2@4.1.0-rc.0/dist/css/select2.min.css', [], '4.1.0');
         
-        // Custom JS for Select2 initialization
+        // Add custom CSS and JS for Select2 initialization
+        wp_add_inline_style('select2', '
+            .school-filter-container {
+                display: inline-flex;
+                align-items: center;
+                gap: 8px;
+                margin-right: 15px;
+            }
+            .school-filter-container .select2-container {
+                vertical-align: middle;
+            }
+            .school-filter-container .button {
+                height: 30px;
+                line-height: 28px;
+                padding: 0 12px;
+                font-size: 13px;
+            }
+            .school-filter-info {
+                margin-left: 10px;
+                color: #666;
+                font-size: 12px;
+                font-style: italic;
+            }
+        ');
+        
         wp_add_inline_script('select2', '
             jQuery(document).ready(function($) {
+                // Configuración mejorada de Select2 para el filtro de escuelas
                 $("#filter_school").select2({
+                    placeholder: "' . esc_js(__('Search schools...', 'neve-child')) . '",
+                    allowClear: true,
+                    minimumInputLength: 2,
+                    width: "250px",
                     ajax: {
                         url: ajaxurl,
                         dataType: "json",
                         delay: 250,
+                        method: "POST",
                         data: function (params) {
                             return {
+                                action: "search_schools_admin",
                                 q: params.term,
-                                action: "search_schools_admin"
+                                page: params.page || 1,
+                                nonce: "' . wp_create_nonce('search_schools_admin') . '"
                             };
                         },
-                        processResults: function (data) {
-                            return {
-                                results: data
-                            };
+                        processResults: function (data, params) {
+                            // El handler devuelve directamente un array
+                            if (Array.isArray(data)) {
+                                return {
+                                    results: data,
+                                    pagination: {
+                                        more: false
+                                    }
+                                };
+                            } else {
+                                // Fallback para respuestas con formato de éxito/error
+                                if (data && data.success && Array.isArray(data.data)) {
+                                    return {
+                                        results: data.data,
+                                        pagination: {
+                                            more: false
+                                        }
+                                    };
+                                } else {
+                                    console.error("Error en búsqueda de escuelas:", data);
+                                    return { results: [] };
+                                }
+                            }
                         },
                         cache: true
-                    },
-                    minimumInputLength: 2,
-                    placeholder: "' . esc_js(__('Search school...', 'neve-child')) . '",
-                    allowClear: true
+                    }
                 });
+                
+                // Logging de cambios para debugging
+                $("#filter_school").on("change", function() {
+                    var selectedValue = $(this).val();
+                    
+                    // Mostrar/ocultar botón clear
+                    if (selectedValue) {
+                        $("#clear_school_filter").show();
+                    } else {
+                        $("#clear_school_filter").hide();
+                    }
+                });
+                
+                // Limpiar filtro
+                $("#clear_school_filter").on("click", function(e) {
+                    e.preventDefault();
+                    $("#filter_school").val(null).trigger("change");
+                    $(this).closest("form").submit();
+                });
+                
+                // Ocultar botón clear si no hay selección inicial
+                if (!$("#filter_school").val()) {
+                    $("#clear_school_filter").hide();
+                }
+                
             });
         ');
     }

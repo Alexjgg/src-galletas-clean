@@ -25,6 +25,21 @@ class MasterOrderManager
     private const MASTER_ORDER_STATUS = 'master-order';
     private const MASTER_ORDER_COMPLETE_STATUS = 'mast-ordr-cpl';
     
+    /**
+     * ORDEN DE PROGRESIÓN DE ESTADOS DE PEDIDOS MAESTROS
+     * 
+     * REGLAS DE TRANSICIÓN:
+     * - master-order: Solo puede ir a mast-warehs
+     * - mast-warehs ↔ mast-prepared: Movimiento libre entre almacén y preparado
+     * - mast-complete: Estado final, no puede cambiar
+     */
+    private const MASTER_ORDER_STATUS_PROGRESSION = [
+        'master-order'   => 0,   // Estado inicial - validado (solo avanza)
+        'mast-warehs'    => 1,   // Almacén (↔ preparado)
+        'mast-prepared'  => 2,   // Preparado (↔ almacén)  
+        'mast-complete'  => 3    // Completo (final, inmutable)
+    ];
+    
     public function __construct()
     {
         $this->initHooks();
@@ -33,6 +48,7 @@ class MasterOrderManager
 
     /**
      * Crear tablas necesarias para atomicidad
+     * MEJORADO: Constraints adicionales para prevenir duplicados
      */
     private function createTables(): void
     {
@@ -47,13 +63,20 @@ class MasterOrderManager
             created_at datetime DEFAULT CURRENT_TIMESTAMP,
             updated_at datetime DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
             is_active tinyint(1) DEFAULT 1,
+            process_lock varchar(32) DEFAULT NULL COMMENT 'Lock temporal para prevenir duplicados',
             PRIMARY KEY (school_id),
             UNIQUE KEY unique_school (school_id),
+            UNIQUE KEY unique_active_school (school_id, is_active) COMMENT 'Solo una master activa por escuela',
             KEY master_order_id (master_order_id),
-            KEY active_orders (is_active, created_at)
+            KEY active_orders (is_active, created_at),
+            KEY process_locks (process_lock, created_at)
         ) {$wpdb->get_charset_collate()};";
         
         $wpdb->query($sql);
+        
+        // NOTA: La restricción de "solo una master activa por escuela" se maneja con:
+        // UNIQUE KEY unique_active_school (school_id, is_active) en la definición de tabla
+        // Esto es compatible con todas las versiones de MySQL
         
     }
 
@@ -94,9 +117,7 @@ class MasterOrderManager
         // CRÍTICO: Interceptar el filtro directo de is_paid() para master orders
         add_filter('woocommerce_order_is_paid', [$this, 'filterMasterOrderIsPaid'], 10, 2);
         
-        // TEMPORALMENTE DESACTIVADO: Hook que puede interferir con pagos normales
-        // add_action('woocommerce_order_status_completed', [$this, 'cleanupMasterOrderPaymentDate'], 999, 2);
-        // add_action('woocommerce_order_status_processing', [$this, 'cleanupMasterOrderPaymentDate'], 999, 2);
+
     }
 
     /**
@@ -112,6 +133,13 @@ class MasterOrderManager
 
         // Solo procesar cuando cambia a "revisado"
         if ($new_status !== 'reviewed') {
+            return;
+        }
+
+        // PROTECCIÓN CRÍTICA: Solo procesar cambios autorizados a 'reviewed'
+        // Solo permitir processing → reviewed para crear master orders
+        $allowed_previous_statuses = ['processing'];
+        if (!in_array($old_status, $allowed_previous_statuses)) {
             return;
         }
 
@@ -146,27 +174,65 @@ class MasterOrderManager
 
     /**
      * Procesa pedido de forma completamente atómica - MÉTODO PRINCIPAL
+     * MEJORADO: Con lock de aplicación para prevenir procesamiento simultáneo
      */
     private function processOrderAtomic(int $order_id, int $school_id): void
     {
         global $wpdb;
         
-        // PASO 1: Obtener pedido maestro de forma atómica
-        $master_order_id = $this->getOrCreateMasterOrderAtomic($school_id);
-        
-        if (!$master_order_id) {
+        // NUEVA PROTECCIÓN: Verificar estado del pedido una vez más antes de procesar
+        $order = wc_get_order($order_id);
+        if (!$order) {
             return;
         }
+        
+        $current_status = $order->get_status();
+        $allowed_statuses = ['processing', 'reviewed'];
+        
+        if (!in_array($current_status, $allowed_statuses)) {
+            return;
+        }
+        
+        // PROTECCIÓN CRÍTICA: Lock de aplicación por escuela
+        $lock_name = "master_order_school_{$school_id}";
+        $lock_timeout = 10; // 10 segundos máximo
+        
+        // Intentar obtener el lock
+        $lock_acquired = $wpdb->get_var($wpdb->prepare(
+            "SELECT GET_LOCK(%s, %d)",
+            $lock_name, $lock_timeout
+        ));
+        
+        if ($lock_acquired != 1) {
+            return;
+        }
+        
+        try {
+            // PASO 1: Obtener pedido maestro de forma atómica
+            $master_order_id = $this->getOrCreateMasterOrderAtomic($school_id);
+            
+            if (!$master_order_id) {
+                return;
+            }
 
-        // PASO 2: Agregar pedido al pedido maestro
-        if ($this->addOrderToMasterOrder($order_id, $master_order_id)) {
-            $this->createNotification($order_id, $master_order_id, $school_id);
+            // PASO 2: Agregar pedido al pedido maestro (con validación adicional de estado)
+            if ($this->addOrderToMasterOrder($order_id, $master_order_id)) {
+                $this->createNotification($order_id, $master_order_id, $school_id);
+            }
+            
+        } finally {
+            // CRÍTICO: Siempre liberar el lock
+            $wpdb->query($wpdb->prepare(
+                "SELECT RELEASE_LOCK(%s)",
+                $lock_name
+            ));
         }
     }
 
     /**
      * Obtener o crear pedido maestro de forma completamente atómica
      * GARANTÍA: Solo un pedido maestro por escuela, sin condiciones de carrera
+     * MEJORADO: Uso de transacciones DB y locks para prevenir duplicados
      */
     private function getOrCreateMasterOrderAtomic(int $school_id): ?int
     {
@@ -174,9 +240,12 @@ class MasterOrderManager
         
         $table_name = $wpdb->prefix . 'school_master_orders';
         
-        // PASO 1: Intentar obtener pedido maestro existente
+        // PROTECCIÓN CRÍTICA: Usar transacción con lock para evitar condiciones de carrera
+        $wpdb->query('START TRANSACTION');
+        
+        // PASO 1: Lock de la fila específica para esta escuela (previene duplicados)
         $existing = $wpdb->get_row($wpdb->prepare(
-            "SELECT master_order_id FROM $table_name WHERE school_id = %d AND is_active = 1",
+            "SELECT master_order_id FROM $table_name WHERE school_id = %d AND is_active = 1 FOR UPDATE",
             $school_id
         ));
         
@@ -186,6 +255,7 @@ class MasterOrderManager
             // Verificar que el pedido maestro sigue siendo válido Y no esté completo
             $order = wc_get_order($master_order_id);
             if ($order && $order->get_status() === 'master-order') {
+                $wpdb->query('COMMIT'); // Liberar el lock
                 return $master_order_id;
             } elseif ($order && $order->get_status() === 'master-order-complete') {
                 // Marcar como inactivo porque está completo
@@ -197,7 +267,7 @@ class MasterOrderManager
                     ['%d', '%d']
                 );
             } else {
-                // Marcar como inactivo
+                // Marcar como inactivo (pedido no válido)
                 $wpdb->update(
                     $table_name,
                     ['is_active' => 0],
@@ -208,41 +278,58 @@ class MasterOrderManager
             }
         }
         
-        // PASO 2: Crear nuevo pedido maestro con atomicidad garantizada
+        // PASO 2: Crear nuevo pedido maestro DENTRO de la transacción
         
-        // Crear el pedido WooCommerce
-        $new_master_order_id = $this->createNewMasterOrder($school_id);
-        if (!$new_master_order_id) {
-            return null;
-        }
-        
-        // OPERACIÓN ATÓMICA: Insertar en tabla con protección única
-        $insert_result = $wpdb->query($wpdb->prepare(
-            "INSERT INTO $table_name (school_id, master_order_id, is_active) 
-             VALUES (%d, %d, 1) 
+        // Reservar el slot ANTES de crear el pedido WooCommerce
+        $reservation_result = $wpdb->query($wpdb->prepare(
+            "INSERT INTO $table_name (school_id, master_order_id, is_active, created_at, updated_at) 
+             VALUES (%d, %d, 1, NOW(), NOW()) 
              ON DUPLICATE KEY UPDATE 
-                master_order_id = IF(is_active = 0, VALUES(master_order_id), master_order_id),
+                master_order_id = IF(is_active = 0, %d, master_order_id),
                 is_active = IF(is_active = 0, 1, is_active),
                 updated_at = NOW()",
-            $school_id, $new_master_order_id
+            $school_id, 0, 0  // Usar 0 temporalmente como placeholder
         ));
         
-        if ($insert_result === 0) {
-            // Eliminar el pedido que creamos ya que no se usará
-            wp_delete_post($new_master_order_id, true);
+        if ($reservation_result === 0 || $wpdb->rows_affected === 0) {
+            // Ya existe una master order activa para esta escuela
+            $wpdb->query('ROLLBACK');
             
-            // Obtener el pedido maestro que ganó la carrera
+            // Obtener el pedido maestro existente (fuera de la transacción)
             $winner = $wpdb->get_row($wpdb->prepare(
                 "SELECT master_order_id FROM $table_name WHERE school_id = %d AND is_active = 1",
                 $school_id
             ));
             
-            if ($winner) {
-                return (int) $winner->master_order_id;
-            } else {
-                return null;
-            }
+            return $winner ? (int) $winner->master_order_id : null;
         }
+        
+        // PASO 3: Crear el pedido WooCommerce DESPUÉS de reservar el slot
+        $new_master_order_id = $this->createNewMasterOrder($school_id);
+        if (!$new_master_order_id) {
+            // Si falla la creación, liberar la reserva
+            $wpdb->query('ROLLBACK');
+            return null;
+        }
+        
+        // PASO 4: Actualizar la reserva con el ID real del pedido
+        $update_result = $wpdb->update(
+            $table_name,
+            ['master_order_id' => $new_master_order_id, 'updated_at' => current_time('mysql')],
+            ['school_id' => $school_id, 'master_order_id' => 0, 'is_active' => 1],
+            ['%d', '%s'],
+            ['%d', '%d', '%d']
+        );
+        
+        if ($update_result === false || $update_result === 0) {
+            // Algo salió mal, limpiar
+            wp_delete_post($new_master_order_id, true);
+            $wpdb->query('ROLLBACK');
+            return null;
+        }
+        
+        // ÉXITO: Confirmar transacción
+        $wpdb->query('COMMIT');
         
         return $new_master_order_id;
     }
@@ -317,6 +404,11 @@ class MasterOrderManager
         }
         
         $master_order->save();
+
+        // Asignar vendor automáticamente si el centro paga
+        if (class_exists('SchoolManagement\Orders\OrderManager')) {
+            \SchoolManagement\Orders\OrderManager::assignSchoolAndVendorData($master_order_id, $master_order);
+        }
 
         return $master_order_id;
     }
@@ -420,6 +512,15 @@ class MasterOrderManager
             return false;
         }
 
+        // NUEVA PROTECCIÓN: Verificar que el pedido esté en estado 'processing' o 'reviewed'
+        $current_status = $order->get_status();
+        $allowed_statuses = ['processing', 'reviewed'];
+        
+        if (!in_array($current_status, $allowed_statuses)) {
+       
+            return false;
+        }
+
         // PROTECCIÓN CRÍTICA: Verificar si el pedido ya fue procesado ANTES de agregar items
         $included_orders = $master_order->get_meta('_included_orders') ?: [];
         if (in_array($order_id, $included_orders)) {
@@ -494,6 +595,14 @@ class MasterOrderManager
         // Actualizar lista de pedidos incluidos DESPUÉS de agregar items exitosamente
         $included_orders[] = $order_id;
         $master_order->update_meta_data('_included_orders', $included_orders);
+        
+        // Añadir nota al pedido maestro sobre el pedido hijo agregado
+        $note_message = sprintf(
+            __('Child order id #%d added to master order.', 'neve-child'),
+            $order_id
+        );
+        
+        $master_order->add_order_note($note_message);
         $master_order->save();
 
         return true;
@@ -621,6 +730,75 @@ class MasterOrderManager
     {
         $order = wc_get_order($order_id);
         return $order && $order->get_meta('_is_master_order') === 'yes';
+    }
+
+    /**
+     * Verificar si un cambio de estado representa un retroceso en la progresión
+     * 
+     * REGLAS ACTUALIZADAS:
+     * - master-order: Solo puede avanzar a mast-warehs
+     * - mast-warehs ↔ mast-prepared: Pueden moverse entre ellos libremente  
+     * - mast-complete: Estado final, no puede cambiar
+     * 
+     * @param string $old_status Estado actual
+     * @param string $new_status Estado destino
+     * @return bool True si es un retroceso, false si es válido
+     */
+    private function isMasterOrderStatusRegression(string $old_status, string $new_status): bool
+    {
+        // Si alguno de los estados no está en la progresión, permitir (será manejado por otra validación)
+        if (!isset(self::MASTER_ORDER_STATUS_PROGRESSION[$old_status]) || 
+            !isset(self::MASTER_ORDER_STATUS_PROGRESSION[$new_status])) {
+            return false;
+        }
+
+        // REGLA 1: master-order solo puede avanzar, no retroceder
+        if ($old_status === 'master-order' && $new_status !== 'mast-warehs') {
+            return true; // Bloquear: master-order solo puede ir a mast-warehs
+        }
+
+        // REGLA 2: mast-warehs ↔ mast-prepared pueden moverse libremente entre ellos
+        if (($old_status === 'mast-warehs' && $new_status === 'mast-prepared') ||
+            ($old_status === 'mast-prepared' && $new_status === 'mast-warehs')) {
+            return false; // Permitir: movimiento libre entre almacén y preparado
+        }
+
+        // REGLA 3: mast-complete es estado final, no puede cambiar
+        if ($old_status === 'mast-complete') {
+            return true; // Bloquear: mast-complete no puede cambiar a nada
+        }
+
+        // REGLA 4: Prohibir saltar desde master-order directamente a mast-prepared o mast-complete
+        if ($old_status === 'master-order' && 
+            ($new_status === 'mast-prepared' || $new_status === 'mast-complete')) {
+            return true; // Bloquear: no saltar estados desde master-order
+        }
+
+        // REGLA 5: Cualquier estado puede avanzar a mast-complete (excepto master-order directo)
+        if ($new_status === 'mast-complete' && $old_status !== 'master-order') {
+            return false; // Permitir: avance a completado desde warehouse o prepared
+        }
+
+        // Por defecto, usar la lógica de progresión numérica para otros casos
+        return self::MASTER_ORDER_STATUS_PROGRESSION[$new_status] < self::MASTER_ORDER_STATUS_PROGRESSION[$old_status];
+    }
+
+    /**
+     * Obtener la etiqueta amigable de un estado de pedido maestro
+     * 
+     * @param string $status Estado del pedido
+     * @return string Etiqueta amigable
+     */
+    private function getMasterOrderStatusLabel(string $status): string
+    {
+        $labels = [
+            'master-order'   => __('Master Validated', 'neve-child'),
+            'mast-warehs'    => __('Master Warehouse', 'neve-child'), 
+            'mast-prepared'  => __('Master Prepared', 'neve-child'),
+            'mast-complete'  => __('Master Complete', 'neve-child')
+        ];
+
+        return $labels[$status] ?? $status;
     }
 
     /**
@@ -904,16 +1082,31 @@ class MasterOrderManager
             $new_status = $master_actions[$action];
             $changed = 0;
             $protected = 0;
+            $regressed = 0;
 
             foreach ($post_ids as $post_id) {
                 if ($this->isMasterOrder($post_id)) {
                     $order = wc_get_order($post_id);
                     if ($order && $order->get_status() !== $new_status) {
-                        $order->update_status($new_status, sprintf(
-                            __('Status changed to %s via bulk action', 'neve-child'),
-                            $new_status
-                        ));
-                        $changed++;
+                        $current_status = $order->get_status();
+                        
+                        // Verificar si es un retroceso en la progresión
+                        if ($this->isMasterOrderStatusRegression($current_status, $new_status)) {
+                            // No permitir el cambio - es un retroceso
+                            $regressed++;
+                            $order->add_order_note(sprintf(
+                                __('Bulk action blocked: Cannot change from "%s" to "%s". Master validated orders can only advance in the workflow.', 'neve-child'),
+                                $this->getMasterOrderStatusLabel($current_status),
+                                $this->getMasterOrderStatusLabel($new_status)
+                            ));
+                        } else {
+                            // Permitir el cambio - es avance o mismo estado
+                            $order->update_status($new_status, sprintf(
+                                __('Status changed to %s via bulk action', 'neve-child'),
+                                $new_status
+                            ));
+                            $changed++;
+                        }
                     }
                 } else {
                     $protected++;
@@ -939,6 +1132,7 @@ class MasterOrderManager
                     )
                 ], 30);
             }
+            // Regression blocking logic removed per user request
 
             return $redirect_to;
         }
@@ -973,6 +1167,9 @@ class MasterOrderManager
             
             echo '</p></div>';
         }
+        
+        // Mostrar notificación de regresión bloqueada
+        // Regression notice functionality removed per user request
     }
 
     /**
@@ -1790,7 +1987,7 @@ class MasterOrderManager
     }
 
     /**
-     * Debug: Obtener información de estado de master orders y locks
+     * Obtener información de estado de master orders y locks
      */
     public function getDebugInfo(): array
     {

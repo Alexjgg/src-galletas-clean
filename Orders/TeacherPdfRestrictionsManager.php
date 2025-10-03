@@ -30,7 +30,8 @@ class TeacherPdfRestrictionsManager
     private const RESTRICTED_DOCUMENT_TYPES = [
         'invoice',
         'simplified-invoice',
-        'packing-slip'
+        'credit-note',
+        'simplified-credit-note',
     ];
 
     /**
@@ -91,21 +92,27 @@ class TeacherPdfRestrictionsManager
         }
 
         $user = wp_get_current_user();
-        return $user && in_array('profesor', (array) $user->roles);
+        return $user && in_array('teacher', (array) $user->roles);
     }
 
     /**
      * Bloquear acceso a documentos específicos usando hook nativo del plugin
      * 
      * @param bool $is_allowed Si el documento está permitido
-     * @param string $document_type Tipo de documento
+     * @param mixed $document_object Objeto documento o string del tipo de documento
      * @return bool
      */
-    public function blockDocumentAccess(bool $is_allowed, string $document_type): bool
+    public function blockDocumentAccess(bool $is_allowed, $document_object): bool
     {
         // Si ya está bloqueado, mantener el bloqueo
         if (!$is_allowed) {
             return false;
+        }
+
+        // Extraer el tipo de documento del objeto o string
+        $document_type = $this->extractDocumentType($document_object);
+        if (!$document_type) {
+            return $is_allowed; // Si no podemos determinar el tipo, permitir
         }
 
         // Verificar si es un tipo de documento restringido
@@ -306,6 +313,64 @@ class TeacherPdfRestrictionsManager
     }
 
     /**
+     * Extraer el tipo de documento desde un objeto o string
+     * 
+     * @param mixed $document_object Objeto documento o string del tipo
+     * @return string|null Tipo de documento o null si no se puede determinar
+     */
+    private function extractDocumentType($document_object): ?string
+    {
+        // Si es un string, devolverlo directamente
+        if (is_string($document_object)) {
+            return $document_object;
+        }
+
+        // Si es un objeto, intentar extraer el tipo
+        if (is_object($document_object)) {
+            // Método 1: Verificar si tiene método get_type()
+            if (method_exists($document_object, 'get_type')) {
+                return $document_object->get_type();
+            }
+
+            // Método 2: Verificar propiedad type
+            if (property_exists($document_object, 'type')) {
+                return $document_object->type;
+            }
+
+            // Método 3: Basado en el nombre de la clase
+            $class_name = get_class($document_object);
+            
+            // Mapeo más específico basado en las clases del plugin WooCommerce PDF Invoices
+            if (strpos($class_name, 'Invoice') !== false) {
+                // Distinguir entre invoice normal y simplified
+                if (strpos($class_name, 'Simplified') !== false) {
+                    return 'simplified-invoice';
+                }
+                return 'invoice';
+            }
+            if (strpos($class_name, 'PackingSlip') !== false) {
+                return 'packing-slip';
+            }
+            if (strpos($class_name, 'CreditNote') !== false) {
+                // Distinguir entre credit-note normal y simplified
+                if (strpos($class_name, 'Simplified') !== false) {
+                    return 'simplified-credit-note';
+                }
+                return 'credit-note';
+            }
+            if (strpos($class_name, 'Receipt') !== false) {
+                return 'receipt';
+            }
+            if (strpos($class_name, 'Proforma') !== false) {
+                return 'proforma';
+            }
+        }
+
+        // Si llegamos aquí, no pudimos determinar el tipo
+        return null;
+    }
+
+    /**
      * Establecer mensaje de restricción en sesión
      * 
      * @param string $message Mensaje a mostrar
@@ -353,7 +418,7 @@ class TeacherPdfRestrictionsManager
     }
 
     /**
-     * Obtener información del plugin para debugging
+     * Obtener información del plugin
      * 
      * @return array
      */

@@ -207,10 +207,9 @@ class SchoolManagementBootstrap {
                 // Orquestador principal (depende de los componentes especializados)
                 'SchoolManagement\Integration\VendorDataManager' => [
                     'dependencies' => [
-                        'SchoolManagement\Integration\VendorAEATIntegration',
                         'SchoolManagement\Integration\VendorPDFManager'
                     ],
-                    'description' => 'Orquestador principal - coordina AEAT y PDF'
+                    'description' => 'Orquestador principal - coordina PDF (AEAT deshabilitado temporalmente)'
                 ],
                 
                 // Validador de campos (independiente)
@@ -301,7 +300,7 @@ class SchoolManagementBootstrap {
             if ($className === 'SchoolManagement\Payments\PaymentHandler') {
                 // Usar singleton para PaymentHandler
                 $instance = $className::getInstance();
-                file_put_contents(ABSPATH . 'hook-test.log', date('Y-m-d H:i:s') . " - Bootstrap: PaymentHandler obtenido via Singleton\n", FILE_APPEND);
+              
             } else {
                 $instance = empty($allArgs) 
                     ? new $className() 
@@ -315,10 +314,6 @@ class SchoolManagementBootstrap {
             if (!empty($config['store_global'])) {
                 $GLOBALS[$config['store_global']] = $instance;
                 
-                // Log adicional para PaymentHandler
-                if ($className === 'SchoolManagement\Payments\PaymentHandler') {
-                    file_put_contents(ABSPATH . 'hook-test.log', date('Y-m-d H:i:s') . " - Bootstrap: PaymentHandler guardado en GLOBALS como 'payment_handler_instance'\n", FILE_APPEND);
-                }
             }
             
         } catch (Throwable $e) {

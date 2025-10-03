@@ -40,15 +40,23 @@ class PackingSlipCustomizer
         add_action('plugins_loaded', [$this, 'checkPluginCompatibility']);
         
         // Hooks para mostrar número de alumno en TODOS los albaranes
-        add_action('wpo_wcpdf_before_order_details', [$this, 'displayStudentNumberInPdf'], 1, 2);
-        
-        // Hook más específico para personalizar solo el nombre en las direcciones
+        // DESHABILITADO: Para evitar duplicados con las direcciones
+        // add_action('wpo_wcpdf_before_order_details', [$this, 'displayStudentNumberInPdf'], 1, 2);
+
+        // Hook para mostrar información del estudiante después del área de direcciones de envío
+        add_action('wpo_wcpdf_after_shipping_address', [$this, 'displayStudentInfoAfterAddresses'], 10, 2);
+
+        // Hooks para personalizar direcciones y mostrar solo información del estudiante
         add_filter('woocommerce_order_formatted_billing_address', [$this, 'customizeOrderBillingAddress'], 10, 2);
         add_filter('woocommerce_order_formatted_shipping_address', [$this, 'customizeOrderShippingAddress'], 10, 2);
         
-        // Hooks adicionales para personalización de albaranes
-        add_filter('wpo_wcpdf_document_title', [$this, 'customizeDocumentTitle'], 10, 2);
-        add_action('wpo_wcpdf_after_order_details', [$this, 'addCustomFooterInfo'], 10, 2);
+        // 🎯 HOOKS PARA TAX ID EN PACKING SLIPS - Igual que en facturas
+        add_filter('wpo_wcpdf_shop_coc_number', [$this, 'filterPackingSlipTaxId'], 5, 2);
+        add_filter('wpo_wcpdf_formatted_shop_coc_number', [$this, 'filterPackingSlipTaxId'], 5, 2);
+        add_filter('wpo_wcpdf_shop_vat_number', [$this, 'filterPackingSlipTaxId'], 5, 2);
+        add_filter('wpo_wcpdf_formatted_shop_vat_number', [$this, 'filterPackingSlipTaxId'], 5, 2);
+        add_filter('wpo_wcpdf_coc_number_settings_text', [$this, 'filterPackingSlipTaxId'], 5, 2);
+        add_filter('wpo_wcpdf_vat_number_settings_text', [$this, 'filterPackingSlipTaxId'], 5, 2);
     }
 
     /**
@@ -68,12 +76,57 @@ class PackingSlipCustomizer
     public function showPluginRequiredNotice(): void
     {
         echo '<div class="notice notice-warning">';
-        echo '<p><strong>' . __('Packing Slip Customizer:', 'neve-child-dm-woo') . '</strong> ' . __('Requires the "WooCommerce PDF Invoices & Packing Slips" plugin to work.', 'neve-child-dm-woo') . '</p>';
+        echo '<p>' . __('"WooCommerce PDF Invoices & Packing Slips" plugin is required to work.', 'neve-child') . '</p>';
         echo '</div>';
     }
 
     /**
-     * Personalizar dirección de facturación para mostrar datos del alumno
+     * Mostrar información del estudiante después del área de direcciones
+     * Se ejecuta después de las direcciones de envío, ideal para mostrar las cajas de información
+     */
+    public function displayStudentInfoAfterAddresses(string $document_type, \WC_Order $order): void
+    {
+        // Solo aplicar a packing slips
+        if ($document_type !== 'packing-slip') {
+            return;
+        }
+
+        // Asegurar que tenemos un objeto order válido
+        if (!$order instanceof \WC_Order) {
+            return;
+        }
+
+        // No mostrar para pedidos maestros
+        if ($order->get_meta('_is_master_order') === 'yes') {
+            return;
+        }
+
+        // Obtener datos del estudiante
+        $student_name_parts = $this->getStudentNameParts($order);
+        $student_number = $this->getStudentNumber($order);
+        $total_boxes = $this->getTotalBoxes($order);
+        $school_name = $this->getSchoolName($order);
+
+        ?>
+        <?php if (!empty($student_number)): ?>
+            <div class="student-info-box with-student-number" style="margin: 20px 0; background-color: #ffffff; border: 4px solid #000000; border-radius: 8px; text-align: center; width: 120px; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 15px; color: #000000; font-family: Arial, sans-serif; outline: 4px solid #000000;">
+                <div class="student-number" style="font-size: 28px; font-weight: bold; color: #000000; line-height: 1; margin: 0;">
+                    <?php echo sprintf(__('Nº %s', 'neve-child'), esc_html($student_number)); ?>
+                </div>
+                <div class="total-boxes" style="margin-top: 8px; font-size: 14px; font-weight: normal; color: #000000; line-height: 1;">
+                    <?php echo sprintf(__('Nº de cajas: %s', 'neve-child'), esc_html($total_boxes)); ?>
+                </div>
+            </div>
+        <?php else: ?>
+            <div class="student-info-box total-boxes-only" style="margin: 20px 0; background-color: #ffffff; border: 4px solid #000000; border-radius: 8px; text-align: center; width: 120px; display: flex; align-items: center; justify-content: center; padding: 15px; font-size: 16px; font-weight: bold; color: #000000; font-family: Arial, sans-serif; outline: 4px solid #000000;">
+                <?php echo sprintf(__('Nº de cajas: %s', 'neve-child'), esc_html($total_boxes)); ?>
+            </div>
+        <?php endif; ?>
+        <?php
+    }
+
+    /**
+     * Personalizar dirección de facturación para mostrar solo datos del alumno
      * SOLO APLICA A PACKING SLIPS (albaranes), NO a facturas ni otros documentos
      */
     public function customizeOrderBillingAddress(array $address, \WC_Order $order): array
@@ -98,15 +151,27 @@ class PackingSlipCustomizer
             return $address; // Si no hay datos del alumno, usar dirección original
         }
 
-        // Modificar solo el nombre y apellidos, mantener el resto
-        $address['first_name'] = $student_name_parts['first_name'];
-        $address['last_name'] = $student_name_parts['last_name'];
+        // Obtener nombre del colegio
+        $school_name = $this->getSchoolName($order);
+
+        // Modificar para mostrar solo nombre del alumno y colegio, sin direcciones
+        $address = [
+            'first_name' => $student_name_parts['first_name'],
+            'last_name' => $student_name_parts['last_name'],
+            'company' => $school_name, // Mostrar nombre del colegio en empresa
+            'address_1' => '', // Ocultar dirección
+            'address_2' => '', // Ocultar dirección 2
+            'city' => '', // Ocultar ciudad
+            'state' => '', // Ocultar estado/provincia
+            'postcode' => '', // Ocultar código postal
+            'country' => '', // Ocultar país
+        ];
 
         return $address;
     }
 
     /**
-     * Personalizar dirección de envío para mostrar datos del alumno
+     * Personalizar dirección de envío para mostrar solo datos del alumno
      * SOLO APLICA A PACKING SLIPS (albaranes), NO a facturas ni otros documentos
      */
     public function customizeOrderShippingAddress(array $address, \WC_Order $order): array
@@ -131,9 +196,21 @@ class PackingSlipCustomizer
             return $address; // Si no hay datos del alumno, usar dirección original
         }
 
-        // Modificar solo el nombre y apellidos, mantener el resto
-        $address['first_name'] = $student_name_parts['first_name'];
-        $address['last_name'] = $student_name_parts['last_name'];
+        // Obtener nombre del colegio
+        $school_name = $this->getSchoolName($order);
+
+        // Modificar para mostrar solo nombre del alumno y colegio, sin direcciones
+        $address = [
+            'first_name' => $student_name_parts['first_name'],
+            'last_name' => $student_name_parts['last_name'],
+            'company' => $school_name, // Mostrar nombre del colegio en empresa
+            'address_1' => '', // Ocultar dirección
+            'address_2' => '', // Ocultar dirección 2
+            'city' => '', // Ocultar ciudad
+            'state' => '', // Ocultar estado/provincia
+            'postcode' => '', // Ocultar código postal
+            'country' => '', // Ocultar país
+        ];
 
         return $address;
     }
@@ -240,141 +317,184 @@ class PackingSlipCustomizer
     }
 
     /**
-     * Mostrar número del alumno en TODOS los PDFs usando el hook correcto
-     * Aplica tanto a albaranes individuales como masivos
+     * Obtener el nombre del colegio desde los meta del pedido
      */
-    public function displayStudentNumberInPdf(string $document_type, $order): void
-    {        
-        // Solo aplicar a packing slips
-        if ($document_type !== 'packing-slip') {
-            return;
+    private function getSchoolName(\WC_Order $order): string
+    {
+        // Intentar obtener el nombre del colegio desde los meta del pedido
+        $school_name = $order->get_meta('_school_name');
+        
+        // Si no está disponible, intentar obtenerlo desde el ID del colegio
+        if (empty($school_name)) {
+            $school_id = $order->get_meta('_school_id');
+            if (!empty($school_id)) {
+                $school_post = get_post($school_id);
+                if ($school_post && $school_post->post_status === 'publish') {
+                    $school_name = $school_post->post_title;
+                }
+            }
         }
         
-        // Asegurar que tenemos un objeto order válido
-        if (!$order instanceof \WC_Order) {
-            return;
+        // Si aún no tenemos nombre, intentar desde ACF del pedido
+        if (empty($school_name) && function_exists('get_field')) {
+            $school_name = get_field('school_name', $order->get_id());
         }
         
-        $order_id = $order->get_id();
+        // Fallback: usar texto por defecto si no hay información del colegio
+        if (empty($school_name)) {
+            $school_name = __('School', 'neve-child');
+        }
         
-        // Crear clave única para este pedido específico para evitar duplicados por pedido
-        static $displayed_for_orders = [];
+        return $school_name;
+    }
+
+    /**
+     * Obtener el número del alumno desde los campos ACF
+     */
+    private function getStudentNumber(\WC_Order $order): string
+    {
+        $customer_user_id = $order->get_customer_id();
         
-        // Si ya se mostró para este pedido específico, no volver a mostrar
-        if (isset($displayed_for_orders[$order_id])) {
-            return;
+        if (!$customer_user_id) {
+            return '';
         }
 
-        // Verificar si es pedido maestro
-        $is_master_order = ($order->get_meta('_is_master_order') === 'yes');
+        // Obtener el número del alumno desde ACF del cliente
+        $user_number = '';
+        if (function_exists('get_field')) {
+            $user_number = get_field('user_number', 'user_' . $customer_user_id);
+        }
         
-        // Calcular total de productos (cantidad total de cajas) - siempre necesario
+        // Fallback: obtener desde user meta directo
+        if (empty($user_number)) {
+            $user_number = get_user_meta($customer_user_id, 'user_number', true);
+        }
+
+        return (string) $user_number;
+    }
+
+    /**
+     * Calcular el total de cajas (cantidad total de productos) del pedido
+     */
+    private function getTotalBoxes(\WC_Order $order): int
+    {
         $total_boxes = 0;
         foreach ($order->get_items() as $item) {
             $total_boxes += $item->get_quantity();
         }
+        return $total_boxes;
+    }
 
-        // Marcar que ya se mostró para este pedido específico
-        $displayed_for_orders[$order_id] = true;
+    /**
+     * 🎯 Filtrar Tax ID del vendor para packing slips
+     * Solo se aplica cuando se está generando un packing slip
+     */
+    public function filterPackingSlipTaxId($tax_id, $document): string
+    {
+        // Solo aplicar a packing slips, NO a facturas ni otros documentos
+        if (!$this->isGeneratingPackingSlip()) {
+            return $tax_id;
+        }
 
-        if ($is_master_order) {
-            // Para pedidos maestros: solo mostrar total de cajas
-            ?>
-            <div style="margin:20px 0;padding:15px;background-color:#ffffff;color:#000000;text-align:center;border:4px solid #000000;border-radius:8px;page-break-inside:avoid;width:120px;display:flex;align-items:center;justify-content:center;">
-                <div style="font-size:16px;font-weight:bold;color:#000000;line-height:1;">
-                    <?php echo sprintf(__('Total boxes: %s', 'neve-child-dm-woo'), esc_html($total_boxes)); ?>
-                </div>
-            </div>
-            <?php
-        } else {
-            // Para pedidos normales: intentar mostrar número de alumno + total de cajas
-            // PERO SIEMPRE mostrar al menos el total de cajas
-            
-            // Obtener el ID del usuario que hizo el pedido (cliente)
-            $customer_user_id = $order->get_customer_id();
-            
-            $user_number = '';
-            
-            // Solo intentar obtener número de alumno si hay usuario
-            if ($customer_user_id && get_userdata($customer_user_id)) {
-                // Obtener el número del alumno desde ACF del cliente
-                if (function_exists('get_field')) {
-                    $user_number = get_field('user_number', 'user_' . $customer_user_id);
-                }
+        if (!is_object($document)) {
+            return $tax_id;
+        }
+
+        $order_id = $this->getOrderIdFromDocument($document);
+        if ($order_id) {
+            $vendor_id = $this->getVendorId($order_id);
+            if ($vendor_id) {
+                $vendor_tax_id = get_field('_taxIdentificationNumber', $vendor_id) ?: '';
+                $cleaned_tax_id = trim(str_replace(':', '', $vendor_tax_id));
                 
-                // Fallback: obtener desde user meta directo
-                if (empty($user_number)) {
-                    $user_number = get_user_meta($customer_user_id, 'user_number', true);
+                if ($cleaned_tax_id) {
+                    return $cleaned_tax_id;
                 }
             }
+        }
+        
+        return $tax_id;
+    }
 
-            // MOSTRAR SIEMPRE: con número de alumno si lo tiene, o solo total si no lo tiene
-            if (!empty($user_number)) {
-                // CON número de alumno
-                ?>
-                <div style="margin:20px 0;padding:15px;background-color:#ffffff;color:#000000;text-align:center;border:4px solid #000000;border-radius:8px;page-break-inside:avoid;width:120px;display:flex;flex-direction:column;align-items:center;justify-content:center;">
-                    <h1 style="margin:0;font-size:28px;font-weight:bold;color:#000000;line-height:1;">
-                        <?php echo sprintf(__('No. %s', 'neve-child-dm-woo'), esc_html($user_number)); ?>
-                    </h1>
-                    <div style="margin-top:8px;font-size:14px;font-weight:normal;color:#000000;line-height:1;">
-                        <?php echo sprintf(__('Total boxes: %s', 'neve-child-dm-woo'), esc_html($total_boxes)); ?>
-                    </div>
-                </div>
-                <?php
-            } else {
-                // SIN número de alumno - SOLO mostrar total de cajas
-                ?>
-                <div style="margin:20px 0;padding:15px;background-color:#ffffff;color:#000000;text-align:center;border:4px solid #000000;border-radius:8px;page-break-inside:avoid;width:120px;display:flex;align-items:center;justify-content:center;">
-                    <div style="font-size:16px;font-weight:bold;color:#000000;line-height:1;">
-                        <?php echo sprintf(__('Total boxes: %s', 'neve-child-dm-woo'), esc_html($total_boxes)); ?>
-                    </div>
-                </div>
-                <?php
+    /**
+     * Obtener order_id de un documento
+     */
+    private function getOrderIdFromDocument($document): ?int
+    {
+        if (!is_object($document)) {
+            return null;
+        }
+        
+        if (method_exists($document, 'get_order_id')) {
+            return $document->get_order_id();
+        }
+        
+        if (property_exists($document, 'order_id')) {
+            return $document->order_id;
+        }
+        
+        return null;
+    }
+
+    /**
+     * Obtener vendor_id desde un order_id
+     */
+    private function getVendorId($order_id): ?int
+    {
+        $order = wc_get_order($order_id);
+        if (!$order) {
+            return null;
+        }
+
+        // Primero, verificar si la orden ya tiene vendor_id directamente asignado
+        $vendor_id = $order->get_meta('_vendor_id');
+        if ($vendor_id) {
+            return (int) $vendor_id;
+        }
+
+        // Fallback: buscar vendor a través del school_id
+        $school_id = $this->getSchoolIdFromOrder($order);
+        if (!$school_id) {
+            return null;
+        }
+
+        return get_field('vendor', $school_id);
+    }
+
+    /**
+     * Obtener school_id del order
+     */
+    private function getSchoolIdFromOrder($order): ?int
+    {
+        // Si es un refund, obtener el pedido padre
+        if ($order instanceof \WC_Order_Refund) {
+            $parent_id = $order->get_parent_id();
+            if ($parent_id) {
+                $order = wc_get_order($parent_id);
             }
         }
-    }
 
-    /**
-     * Personalizar título del documento
-     */
-    public function customizeDocumentTitle(string $title, $document): string
-    {
-        // Solo aplicar a packing slips
-        if (!is_object($document) || $document->get_type() !== 'packing-slip') {
-            return $title;
-        }
-
-        // Aquí puedes personalizar el título según tus necesidades
-        // Por ejemplo, agregar información de la escuela
-        return $title;
-    }
-
-    /**
-     * Agregar información personalizada al final del albarán
-     */
-    public function addCustomFooterInfo(string $document_type, $order): void
-    {
-        // Solo aplicar a packing slips
-        if ($document_type !== 'packing-slip') {
-            return;
-        }
+        // Buscar en diferentes campos
+        $fields = ['_school_id', 'school_id', '_school', 'school'];
         
-        // Asegurar que tenemos un objeto order válido
-        if (!$order instanceof \WC_Order) {
-            return;
+        foreach ($fields as $field) {
+            $value = $order->get_meta($field);
+            if ($value) {
+                return (int) $value;
+            }
         }
 
-        // Aquí puedes agregar información adicional al final del albarán
-        // Por ejemplo, instrucciones especiales, información de la escuela, etc.
-        
-        // Ejemplo: Mostrar información de la escuela si existe
-        $school_info = $order->get_meta('_school_info');
-        if (!empty($school_info)) {
-            ?>
-            <div style="margin-top: 20px; padding: 10px; border-top: 1px solid #ddd; font-size: 12px; color: #666;">
-                <strong><?php _e('School information:', 'neve-child-dm-woo'); ?></strong> <?php echo esc_html($school_info); ?>
-            </div>
-            <?php
+        // Buscar en datos del usuario como fallback
+        $customer_id = $order->get_customer_id();
+        if ($customer_id) {
+            $user_school = get_field('school', 'user_' . $customer_id);
+            if ($user_school) {
+                return (int) $user_school;
+            }
         }
+
+        return null;
     }
+
+
 }

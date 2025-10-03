@@ -35,6 +35,12 @@ class OrderManager
     {
         add_action('woocommerce_checkout_create_order', [$this, 'saveOrderSchoolVendorData'], 10, 2);
         
+        // Hook adicional para capturar master orders y otras órdenes creadas programáticamente
+        add_action('woocommerce_new_order', [$this, 'addSchoolAndVendorData'], 10, 2);
+        
+        // Hook adicional para cuando se actualiza una orden (para capturar master orders después del save)
+        add_action('woocommerce_update_order', [$this, 'addSchoolAndVendorData'], 10, 2);
+        
         // Hooks for old system (post-based)
         add_filter('manage_edit-shop_order_columns', [$this, 'addCustomColumns'], 710, 1);
         add_action('manage_shop_order_posts_custom_column', [$this, 'displayCustomColumnOld'], 710, 2);
@@ -52,6 +58,9 @@ class OrderManager
         
         // Payment status filters (only if PaymentStatusColumn is not active)
         add_action('admin_init', [$this, 'maybeAddPaymentFilters']);
+        
+        // Make master orders editable when in master-warehouse state
+        add_filter('wc_order_is_editable', [$this, 'makeMasterOrdersEditableInWarehouse'], 10, 2);
     }
 
     /**
@@ -82,6 +91,82 @@ class OrderManager
                 $order->update_meta_data(\SchoolManagement\Shared\Constants::ORDER_META_VENDOR_ID, $vendor_id);
                 $order->update_meta_data('_vendor_name', $vendor_name);
             }
+        }
+    }
+
+    /**
+     * Add school and vendor data to any order (including master orders)
+     * 
+     * @param int $order_id Order ID
+     * @param \WC_Order $order Order object
+     * @return void
+     */
+    public function addSchoolAndVendorData(int $order_id, \WC_Order $order): void
+    {
+        self::assignSchoolAndVendorData($order_id, $order);
+    }
+
+    /**
+     * Static method to assign school and vendor data (for external use like MasterOrderManager)
+     * 
+     * @param int $order_id Order ID
+     * @param \WC_Order $order Order object
+     * @return void
+     */
+    public static function assignSchoolAndVendorData(int $order_id, \WC_Order $order): void
+    {
+        // Si ya tiene vendor_id asignado, no hacer nada
+        if ($order->get_meta(\SchoolManagement\Shared\Constants::ORDER_META_VENDOR_ID)) {
+            return;
+        }
+        
+        // Obtener school_id - para master orders está en _school_id, para órdenes normales en user meta
+        $school_id = null;
+        
+        // Verificar si es master order
+        $is_master_order = $order->get_meta('_is_master_order') === 'yes';
+        
+        if ($is_master_order) {
+            // Para master orders, obtener school_id del meta directo
+            $school_id = $order->get_meta('_school_id');
+        } else {
+            // Para órdenes normales, obtener del user
+            $user_id = $order->get_user_id();
+            if ($user_id) {
+                $school_id = get_user_meta($user_id, 'school_id', true);
+            }
+        }
+        
+        if (empty($school_id)) {
+            return;
+        }
+
+        // Solo actualizar si no existe ya
+        if (!$order->get_meta(\SchoolManagement\Shared\Constants::ORDER_META_SCHOOL_ID)) {
+            $order->update_meta_data(\SchoolManagement\Shared\Constants::ORDER_META_SCHOOL_ID, $school_id);
+            $school_name = get_the_title($school_id);
+            $order->update_meta_data('_school_name', $school_name);
+        }
+
+        // Para master orders, solo asignar vendor si el centro paga
+        if ($is_master_order) {
+            // the_billing_by_the_school = true significa que el centro SÍ paga
+            $the_billing_by_the_school = get_field('the_billing_by_the_school', $school_id);
+            $school_pays = ($the_billing_by_the_school === '1' || $the_billing_by_the_school === 1 || $the_billing_by_the_school === true);
+            
+            if (!$school_pays) {
+                // Si el centro NO paga (padres pagan individualmente), no asignar vendor
+                return;
+            }
+        }
+
+        // Get vendor information
+        $vendor_id = get_field(\SchoolManagement\Shared\Constants::ACF_FIELD_VENDOR, $school_id);
+        if ($vendor_id) {
+            $vendor_name = get_the_title($vendor_id);
+            $order->update_meta_data(\SchoolManagement\Shared\Constants::ORDER_META_VENDOR_ID, $vendor_id);
+            $order->update_meta_data('_vendor_name', $vendor_name);
+            $order->save();
         }
     }
 
@@ -706,6 +791,88 @@ class OrderManager
         $needs_payment = $order->needs_payment();
         $result = !$needs_payment;
         return $result;
+    }
+
+    /**
+     * Make master orders editable when in master-warehouse state
+     * 
+     * @param bool $is_editable Current editable state
+     * @param \WC_Order $order Order object
+     * @return bool Modified editable state
+     */
+    public function makeMasterOrdersEditableInWarehouse(bool $is_editable, \WC_Order $order): bool
+    {
+        // Si ya es editable, no cambiar nada
+        if ($is_editable) {
+            return $is_editable;
+        }
+        
+        // Verificar que sea una master order
+        $is_master_order = $order->get_meta('_is_master_order') === 'yes';
+        if (!$is_master_order) {
+            return $is_editable;
+        }
+        // VERIFICAR PRIMERO SI TIENE FACTURA - Si tiene factura, NO puede editarse
+        if ($this->orderHasInvoice($order)) {
+            return false;
+        }
+        
+        // Verificar que esté en estado master-warehouse (mast-warehs)
+        $order_status = $order->get_status();
+        if ($order_status === 'mast-warehs') {
+            return true;
+        }
+        
+        return $is_editable;
+    }
+
+    /**
+     * Verificar si un pedido tiene factura generada
+     * 
+     * @param \WC_Order $order Objeto del pedido
+     * @return bool True si tiene factura, false si no
+     */
+    private function orderHasInvoice(\WC_Order $order): bool
+    {
+        // Verificar si existe documento de factura (WC PDF Invoices & Packing Slips)
+        if (function_exists('wcpdf_get_document')) {
+            $invoice = wcpdf_get_document('invoice', $order);
+            if ($invoice && $invoice->exists()) {
+                return true;
+            }
+            
+            // También verificar factura simplificada
+            $simplified_invoice = wcpdf_get_document('simplified-invoice', $order);
+            if ($simplified_invoice && $simplified_invoice->exists()) {
+                return true;
+            }
+        }
+        
+        // Verificar meta fields de facturación
+        $invoice_number = $order->get_meta('_wcpdf_invoice_number');
+        $invoice_date = $order->get_meta('_wcpdf_invoice_date');
+        
+        if (!empty($invoice_number) || !empty($invoice_date)) {
+            return true;
+        }
+        
+        // Verificar otros posibles meta fields de facturación
+        $other_invoice_fields = [
+            '_invoice_number',
+            '_factura_numero', 
+            '_invoice_generated',
+            '_wcpdf_invoice_exists',
+            '_wcpdf_invoice_number_data',
+            '_wcpdf_simplified_invoice_number'
+        ];
+        
+        foreach ($other_invoice_fields as $field) {
+            if (!empty($order->get_meta($field))) {
+                return true;
+            }
+        }
+        
+        return false;
     }
 }
  

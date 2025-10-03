@@ -100,11 +100,6 @@ class SchoolPaymentMethodSelector
 
         $user_id = get_current_user_id();
         
-        // TEMPORALMENTE DESACTIVADO: Permitir múltiples pedidos con "pagar más tarde"
-        // if ($this->hasPendingDeferredOrders($user_id)) {
-        //     $available_gateways = $this->removeDeferredRedsysMethod($available_gateways);
-        // }
-        
         // LÓGICA ADICIONAL: Si estamos en checkout de un pedido que cambió de dm_pay_later_card a redsys
         if ($this->isPayingFormerDeferredOrder()) {
 

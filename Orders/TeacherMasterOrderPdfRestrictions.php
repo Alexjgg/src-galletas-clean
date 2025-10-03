@@ -106,14 +106,18 @@ class TeacherMasterOrderPdfRestrictions
         }
 
         // Lista de acciones específicas de pedidos maestros que deben ser removidas para profesores
-        // Estas son las acciones que generan múltiples albaranes desde el pedido maestro
+        // NOTA: Los profesores SÍ pueden generar packing slips individuales de pedidos maestros
+        // Solo bloqueamos facturas y acciones masivas de múltiples albaranes
         $master_order_pdf_actions_to_remove = [
-            'master_order_packing_slip',
+            // Acciones de facturas (siempre bloqueadas para profesores)
             'master_order_invoice', 
-            'master_packing_slip',
             'master_invoice',
+            
+            // Acciones masivas de múltiples albaranes (bloqueadas)
+            'master_order_packing_slip',  // Solo si genera múltiples PDFs
+            'master_packing_slip',        // Solo si genera múltiples PDFs
             'generate_master_pdf',
-            'download_master_pdf',
+            'download_master_pdf', 
             'master_pdf_download',
             'bulk_master_pdf'
         ];
@@ -141,15 +145,13 @@ class TeacherMasterOrderPdfRestrictions
         }
 
         // Lista de bulk actions de PDF que deben ser removidas para profesores
+        // NOTA: packing_slips y delivery_notes están permitidos para profesores
         $pdf_bulk_actions_to_remove = [
             'pdf_invoices',
-            'pdf_packing_slips',
-            'pdf_delivery_notes',
             'pdf_receipts',
             'pdf_proformas',
             'pdf_credit_notes',
-            'mark_printed_invoice',
-            'mark_printed_packing_slip'
+            'mark_printed_invoice'
         ];
 
         foreach ($pdf_bulk_actions_to_remove as $action_key) {
@@ -186,34 +188,79 @@ class TeacherMasterOrderPdfRestrictions
         $action = sanitize_text_field($_GET['action']);
         $order_ids = array_map('intval', explode(',', sanitize_text_field($_GET['order_ids'])));
 
-        // Lista de acciones de PDF que deben ser bloqueadas
-        $blocked_pdf_actions = [
-            'generate_wpo_wcpdf',
-            'wpo_wcpdf',
-            'pdf_invoice',
-            'pdf_packing_slip',
-            'pdf_delivery_note',
-            'pdf_receipt'
-        ];
+        // Verificar si alguno de los pedidos es un pedido maestro
+        $has_master_order = false;
+        foreach ($order_ids as $order_id) {
+            if ($this->isMasterOrder($order_id)) {
+                $has_master_order = true;
+                break;
+            }
+        }
 
-        if (!in_array($action, $blocked_pdf_actions)) {
+        // Si no hay pedidos maestros, permitir todas las acciones
+        if (!$has_master_order) {
             return;
         }
 
-        // Verificar si alguno de los pedidos es un pedido maestro
-        foreach ($order_ids as $order_id) {
-            if ($this->isMasterOrder($order_id)) {
-                // Bloquear acceso y mostrar error
-                wp_die(
-                    esc_html__('Access denied: Teachers cannot generate PDF documents for master orders.', 'neve-child'),
-                    esc_html__('Access Denied', 'neve-child'),
-                    [
-                        'response' => 403,
-                        'back_link' => true
-                    ]
-                );
-            }
+        // Para pedidos maestros, verificar el tipo de documento solicitado
+        $document_type = $this->getDocumentTypeFromRequest();
+        
+        // Lista de tipos de documentos bloqueados para pedidos maestros
+        // NOTA: Los profesores SÍ pueden generar packing-slip individuales de pedidos maestros
+        $blocked_document_types = [
+            'invoice',
+            'simplified-invoice',
+            'credit-note',
+            'simplified-credit-note',
+            'receipt',
+            'proforma'
+        ];
+
+        if (in_array($document_type, $blocked_document_types)) {
+            // Bloquear acceso y mostrar error
+            wp_die(
+                sprintf(
+                    esc_html__('Access denied: Teachers cannot generate %s documents for master orders.', 'neve-child'),
+                    $document_type
+                ),
+                esc_html__('Access Denied', 'neve-child'),
+                [
+                    'response' => 403,
+                    'back_link' => true
+                ]
+            );
         }
+
+        // Si es packing-slip u otro documento permitido, continuar normalmente
+    }
+
+    /**
+     * Extraer el tipo de documento de la petición actual
+     * 
+     * @return string|null
+     */
+    private function getDocumentTypeFromRequest(): ?string
+    {
+        // Intentar obtener de parámetro directo
+        if (isset($_GET['document_type'])) {
+            return sanitize_text_field($_GET['document_type']);
+        }
+
+        // Intentar obtener del action
+        $action = sanitize_text_field($_GET['action'] ?? '');
+        
+        // Mapeo de acciones a tipos de documento
+        $action_to_document_type = [
+            'pdf_invoice' => 'invoice',
+            'pdf_packing_slip' => 'packing-slip',
+            'pdf_delivery_note' => 'delivery-note',
+            'pdf_receipt' => 'receipt',
+            'pdf_credit_note' => 'credit-note',
+            'generate_wpo_wcpdf' => sanitize_text_field($_GET['document_type'] ?? 'unknown'),
+            'wpo_wcpdf' => sanitize_text_field($_GET['document_type'] ?? 'unknown')
+        ];
+
+        return $action_to_document_type[$action] ?? null;
     }
 
     /**

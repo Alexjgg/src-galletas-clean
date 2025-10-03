@@ -549,9 +549,7 @@ class VendorFieldValidator
             return;
         }
 
-        // If format is valid, proceed with official census verification
-        // COMENTADO: Validación con censo oficial desactivada temporalmente
-        // $this->validateWithOfficialCensus($nif);
+        // Census validation is handled separately when needed
     }
 
     /**

@@ -175,7 +175,6 @@ class InvoiceButtonFilter
         remove_meta_box('wpo_wcpdf_invoice_metabox', 'shop_order', 'side');
         remove_meta_box('wpo_wcpdf-simplified-invoice', 'shop_order', 'side');
         remove_meta_box('wpo_wcpdf_simplified-invoice_metabox', 'shop_order', 'side');
-        
     }
     
     /**
@@ -465,7 +464,20 @@ class InvoiceButtonFilter
             $order_id = $document->get_order_id();
         }
         
-        return $order_id ? wc_get_order($order_id) : null;
+        if ($order_id) {
+            $order = wc_get_order($order_id);
+            
+            // Si es un refund, obtener el pedido padre
+            if ($order instanceof \WC_Order_Refund) {
+                $parent_id = $order->get_parent_id();
+                return $parent_id ? wc_get_order($parent_id) : null;
+            }
+            
+            // Solo devolver si es un WC_Order (no un refund)
+            return $order instanceof \WC_Order ? $order : null;
+        }
+        
+        return null;
     }
     
     /**

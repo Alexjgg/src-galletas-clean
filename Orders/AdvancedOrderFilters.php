@@ -52,6 +52,11 @@ class AdvancedOrderFilters
         add_action('wp_ajax_get_schools_for_filter', [$this, 'handleGetSchoolsAjax']);
         add_action('wp_ajax_get_order_statuses_for_filter', [$this, 'handleGetOrderStatusesAjax']);
         
+        // Modificar columnas del admin de pedidos para mostrar nombre del alumno
+        add_filter('manage_woocommerce_page_wc-orders_columns', [$this, 'customizeOrderColumns'], 20);
+        
+        // Modificar específicamente el contenido de la columna order_number (SOLO ESTE HOOK)
+        add_filter('woocommerce_admin_order_buyer_name', [$this, 'customizeOrderBuyerName'], 10, 2);
 
     }
 
@@ -613,6 +618,144 @@ class AdvancedOrderFilters
             'results' => $results,
             'pagination' => ['more' => false]
         ]);
+    }
+
+    /**
+     * Personalizar columnas del admin de pedidos HPOS
+     * Modificar la columna 'order_number' para mostrar nombre del alumno
+     */
+    public function customizeOrderColumns(array $columns): array
+    {
+        // Verificar que estamos en la página correcta
+        $screen = get_current_screen();
+        if (!$screen || $screen->id !== 'woocommerce_page_wc-orders') {
+            return $columns;
+        }
+
+        // Si existe la columna 'order_number', la modificamos
+        if (isset($columns['order_number'])) {
+            $columns['order_number'] = __('Order / Student', 'neve-child');
+        }
+
+        return $columns;
+    }
+
+
+
+    /**
+     * Obtener información del estudiante para un pedido
+     */
+    private function getStudentInfoForOrder(\WC_Order $order): array
+    {
+        $customer_user_id = $order->get_customer_id();
+        $buyer_name = trim($order->get_billing_first_name() . ' ' . $order->get_billing_last_name());
+        
+        $result = [
+            'has_student_data' => false,
+            'student_name' => '',
+            'student_number' => '',
+            'buyer_name' => $buyer_name
+        ];
+        
+        // Si no hay usuario, no hay datos de alumno
+        if (!$customer_user_id || !get_userdata($customer_user_id)) {
+            return $result;
+        }
+        
+        // Obtener datos del alumno desde ACF
+        $user_name = '';
+        $user_first_surname = '';
+        $user_second_surname = '';
+        $user_number = '';
+        
+        if (function_exists('get_field')) {
+            $user_name = get_field('user_name', 'user_' . $customer_user_id);
+            $user_first_surname = get_field('user_first_surname', 'user_' . $customer_user_id);
+            $user_second_surname = get_field('user_second_surname', 'user_' . $customer_user_id);
+            $user_number = get_field('user_number', 'user_' . $customer_user_id);
+        }
+        
+        // Fallback: obtener desde user meta directo
+        if (empty($user_name)) {
+            $user_name = get_user_meta($customer_user_id, 'user_name', true);
+        }
+        if (empty($user_first_surname)) {
+            $user_first_surname = get_user_meta($customer_user_id, 'user_first_surname', true);
+        }
+        if (empty($user_second_surname)) {
+            $user_second_surname = get_user_meta($customer_user_id, 'user_second_surname', true);
+        }
+        if (empty($user_number)) {
+            $user_number = get_user_meta($customer_user_id, 'user_number', true);
+        }
+        
+        // Verificar que tenemos al menos uno de los tres campos del nombre
+        if (!empty($user_name) || !empty($user_first_surname) || !empty($user_second_surname)) {
+            // Combinar nombre completo del alumno con los campos disponibles
+            $full_student_name = '';
+            
+            if (!empty($user_name)) {
+                $full_student_name .= $user_name;
+            }
+            if (!empty($user_first_surname)) {
+                if (!empty($full_student_name)) {
+                    $full_student_name .= ' ';
+                }
+                $full_student_name .= $user_first_surname;
+            }
+            if (!empty($user_second_surname)) {
+                if (!empty($full_student_name)) {
+                    $full_student_name .= ' ';
+                }
+                $full_student_name .= $user_second_surname;
+            }
+            
+            $result['has_student_data'] = true;
+            $result['student_name'] = trim($full_student_name);
+            $result['student_number'] = $user_number;
+        }
+        
+        return $result;
+    }
+
+    /**
+     * Personalizar el nombre del comprador que aparece en la columna order_number
+     * Este hook modifica directamente el nombre que se muestra junto al número de pedido
+     */
+    public function customizeOrderBuyerName(string $buyer_name, \WC_Order $order): string
+    {
+        // Solo aplicar en el admin de pedidos HPOS
+        $screen = get_current_screen();
+        if (!$screen || $screen->id !== 'woocommerce_page_wc-orders') {
+            return $buyer_name;
+        }
+
+        // Verificar si es pedido maestro
+        $is_master_order = ($order->get_meta('_is_master_order') === 'yes');
+        
+        if ($is_master_order) {
+            // Para pedidos maestros, solo mostrar el nombre del colegio sin [MASTER] 
+            // porque ya aparece en el número del pedido
+            return $buyer_name;
+        }
+        
+        // Para pedidos normales, intentar obtener datos del alumno
+        $student_info = $this->getStudentInfoForOrder($order);
+        
+        if ($student_info['has_student_data']) {
+            // Mostrar solo el nombre del alumno de forma simple
+            $student_display = $student_info['student_name'];
+            
+            // Si hay número de alumno, agregarlo de forma compacta
+            if (!empty($student_info['student_number'])) {
+                $student_display .= ' (#' . $student_info['student_number'] . ')';
+            }
+            
+            return $student_display;
+        }
+        
+        // Si no hay datos del alumno, mantener el nombre original
+        return $buyer_name;
     }
 
 }

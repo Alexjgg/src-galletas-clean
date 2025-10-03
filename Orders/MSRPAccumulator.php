@@ -3,7 +3,17 @@
  * MSRP Accumulator for tracking user lifetime MSRP values
  * 
  * Tracks and accumulates the total MSRP (Manufacturer's Suggested Retail Price) 
- * value for each user across all their orders, including handling refunds.
+ * value for each user across all their orders, including ha        $this->subtractUserMSRPTotal($user_id, $refund_msrp_total);
+        
+        // También necesitamos restar del total de ventas el monto del reembolso
+        $this->updateUserIncomingAfterRefund($user_id, $refund);
+
+        // Store refund MSRP total for reference
+        $refund->update_meta_data(self::ORDER_MSRP_TOTAL_META, $refund_msrp_total);
+        $refund->save();
+        
+        // DESACTIVAR bandera - reembolso completado
+        self::$processing_refund = false;s.
  * 
  * @package SchoolManagement\Orders
  * @since 1.0.0
@@ -61,7 +71,7 @@ class MSRPAccumulator
     public function initHooks(): void
     {
         // ⚠️ RESET ALL MSRP DATA - Execute once then comment out
-        // $this->resetAllUserMSRPData();
+        $this->resetAllUserMSRPData();
         
         // ⚠️ COMMENT THE LINE ABOVE AFTER RUNNING ONCE ⚠️
         
@@ -71,7 +81,6 @@ class MSRPAccumulator
         
         // Hook when refund is created
         add_action('woocommerce_order_refunded', [$this, 'subtractRefundMSRPFromUser'], 10, 2);
-        error_log("🔧 MSRP DEBUG - Hook 'woocommerce_order_refunded' registrado correctamente");
         
         // Hook when order status changes from completed/processing to cancelled/failed (subtract)
         add_action('woocommerce_order_status_cancelled', [$this, 'subtractOrderMSRPFromUser'], 10, 2);
@@ -85,7 +94,7 @@ class MSRPAccumulator
         add_action('wp_trash_post', [$this, 'handleOrderTrash']);
         add_action('before_delete_post', [$this, 'handleOrderPermanentDeletion']);
         
-        // Debug hooks for manual recalculation
+
         add_action('wp_ajax_recalculate_user_msrp', [$this, 'ajaxRecalculateUserMSRP']);
         add_action('wp_ajax_get_user_msrp_total', [$this, 'ajaxGetUserMSRPTotal']);
         add_action('wp_ajax_recalculate_user_incoming', [$this, 'ajaxRecalculateUserIncoming']);
@@ -113,11 +122,13 @@ class MSRPAccumulator
             return;
         }
 
-        // // Check if we already processed this order
-        // $already_processed = $order->get_meta('_msrp_processed');
-        // if ($already_processed) {
-        //     return;
-        // }
+        // 🎯 PROTECCIÓN: Verificar si ya fue procesado para evitar doble suma
+        $already_processed = $order->get_meta('_msrp_processed');
+        if ($already_processed === 'yes') {
+            // Log el intento de duplicación para auditoría
+            $this->logDuplicateAttempt($user_id, $order_id, $order->get_status());
+            return;
+        }
 
         $order_msrp_total = $this->calculateOrderMSRPTotal($order);
         
@@ -189,17 +200,8 @@ class MSRPAccumulator
         // ACTIVAR bandera para prevenir recálculos automáticos
         self::$processing_refund = true;
         
-        error_log("🔄 MSRP REFUND DEBUG - INICIO: Order #{$order_id}, Refund #{$refund_id}");
-        error_log("🛡️  REFUND PROTECTION - Bandera activada para prevenir recálculos automáticos");
-        
         $order = wc_get_order($order_id);
         $refund = wc_get_order($refund_id);
-        
-        // DEBUGGING CRÍTICO: Verificar tipos de objeto y IDs
-        error_log("🔍 REFUND DEBUG - Order type: " . ($order ? get_class($order) : 'NULL'));
-        error_log("🔍 REFUND DEBUG - Refund type: " . ($refund ? get_class($refund) : 'NULL'));
-        error_log("🔍 REFUND DEBUG - Order ID verificado: " . ($order ? $order->get_id() : 'NULL'));
-        error_log("🔍 REFUND DEBUG - Refund ID verificado: " . ($refund ? $refund->get_id() : 'NULL'));
         
         if (!$order || !$refund) {
             self::$processing_refund = false; // Restaurar bandera
@@ -213,47 +215,23 @@ class MSRPAccumulator
         }
 
         // Calculate MSRP for refunded items
-        error_log("🔄 MSRP REFUND DEBUG - Calculando MSRP para reembolso #{$refund_id}");
-        
-        // DEBUGGING CRÍTICO: Verificar items del reembolso
-        $refund_items = $refund->get_items();
-        error_log("🔍 REFUND DEBUG - Refund items count: " . count($refund_items));
-        
-        foreach ($refund_items as $item_id => $item) {
-            if ($item instanceof \WC_Order_Item_Product) {
-                $product_name = $item->get_name();
-                $quantity = $item->get_quantity();
-                $product_id = $item->get_product_id();
-                $variation_id = $item->get_variation_id();
-                error_log("🔍 REFUND DEBUG - Item: {$product_name} (ID:{$product_id}, Var:{$variation_id}), Qty: {$quantity}");
-            }
-        }
-        
         $refund_msrp_total = $this->calculateOrderMSRPTotal($refund);
-        error_log("🔄 MSRP REFUND DEBUG - MSRP calculado: {$refund_msrp_total}");
         
         // For refunds, the MSRP total should be positive (we'll subtract it)
         $refund_msrp_total = abs($refund_msrp_total);
-        error_log("🔄 MSRP REFUND DEBUG - Después de abs(): {$refund_msrp_total}");
+
+
         
         if ($refund_msrp_total <= 0) {
-            error_log("❌ MSRP REFUND DEBUG - MSRP <= 0, saltando reembolso");
             self::$processing_refund = false; // Restaurar bandera
             return;
         }
 
-        // DEBUGGING: Verificar total del usuario antes del reembolso
-        $user_msrp_before = (float) get_user_meta($user_id, '_user_msrp_total', true);
-        error_log("🔍 REFUND DEBUG - MSRP usuario antes: €{$user_msrp_before}");
-        
         // Subtract from user's accumulated total
-        error_log("🔄 MSRP REFUND DEBUG - Restando €{$refund_msrp_total} del usuario #{$user_id}");
         $this->subtractFromUserMSRPTotal($user_id, $refund_msrp_total, $refund_id, 'refund');
-        
-        // DEBUGGING: Verificar total del usuario después del reembolso
-        $user_msrp_after = (float) get_user_meta($user_id, '_user_msrp_total', true);
-        error_log("🔍 REFUND DEBUG - MSRP usuario después: €{$user_msrp_after}");
-        error_log("🔍 REFUND DEBUG - Diferencia aplicada: €" . ($user_msrp_before - $user_msrp_after));
+
+        // También necesitamos restar del total de ventas el monto del reembolso
+        $this->updateUserIncomingAfterRefund($user_id, $refund);
 
         // Store refund MSRP total for reference
         $refund->update_meta_data(self::ORDER_MSRP_TOTAL_META, $refund_msrp_total);
@@ -261,9 +239,6 @@ class MSRPAccumulator
         
         // DESACTIVAR bandera - reembolso completado
         self::$processing_refund = false;
-        error_log("🛡️  REFUND PROTECTION - Bandera desactivada, reembolso completado");
-        
-        error_log("✅ MSRP REFUND DEBUG - COMPLETADO: Reembolso #{$refund_id} procesado exitosamente");
     }
 
     /**
@@ -304,21 +279,9 @@ class MSRPAccumulator
         $processed_items = 0;
         $skipped_items = 0;
         
-        error_log("MSRP Order Debug - Order ID: " . $order->get_id() . ", Order Items Count: " . count($order->get_items()));
-        
-        // Detectar si es un refund
-        $is_refund = $order instanceof \WC_Order_Refund;
-        if ($is_refund) {
-            error_log("🔄 MSRP REFUND CALC - Procesando WC_Order_Refund #{$order->get_id()}");
-            error_log("🔍 REFUND CALC DEBUG - Parent Order ID: " . $order->get_parent_id());
-            error_log("🔍 REFUND CALC DEBUG - Refund Amount: " . $order->get_amount());
-            error_log("🔍 REFUND CALC DEBUG - Refund Reason: " . $order->get_reason());
-        }
-        
         foreach ($order->get_items() as $item_id => $item) {
             if (!$item instanceof \WC_Order_Item_Product) {
                 $skipped_items++;
-                error_log("MSRP Skip - Item ID: {$item_id} - Not a product item (type: " . get_class($item) . ")");
                 continue;
             }
 
@@ -338,15 +301,11 @@ class MSRPAccumulator
                 if ($variation_id) {
                     $msrp_price_raw = get_field(self::PRODUCT_MSRP_FIELD, $product_id);
                     $msrp_price = $this->normalizeMSRPPrice($msrp_price_raw);
-                    if ($msrp_price !== false) {
-                        error_log("MSRP Found - Item: '{$product_name}' (ID: {$product_id_for_acf}) - Found MSRP on parent product: {$msrp_price_raw} -> {$msrp_price}");
-                    }
                 }
                 
                 // If still no MSRP, skip this item
                 if ($msrp_price === false) {
                     $skipped_items++;
-                    error_log("MSRP Skip - Item: '{$product_name}' (Product ID: {$product_id}, Variation ID: {$variation_id}) - No valid MSRP price (value: " . var_export($msrp_price_raw, true) . ")");
                     continue;
                 }
             }
@@ -354,13 +313,9 @@ class MSRPAccumulator
             $quantity = $item->get_quantity();
             $item_msrp_total = (float) $msrp_price * abs($quantity);
             
-            error_log("MSRP Item Debug - Product: '{$product_name}' (ID: {$product_id_for_acf}), MSRP Price: {$msrp_price}, Quantity: {$quantity}, Item MSRP Total: {$item_msrp_total}");
-            
             $total_msrp += $item_msrp_total;
             $processed_items++;
         }
-        
-        error_log("MSRP Order Summary - Order ID: " . $order->get_id() . " - Processed: {$processed_items}, Skipped: {$skipped_items}, Total MSRP: {$total_msrp}");
         
         return $total_msrp;
     }
@@ -384,7 +339,6 @@ class MSRPAccumulator
         // Update incoming total (Total Sales - MSRP)
         $this->updateUserIncomingTotal($user_id);
         
-        // Log the change for audit purposes
         $this->logMSRPChange($user_id, $amount, $new_total, $related_id, $reason, 'add');
     }
 
@@ -404,10 +358,12 @@ class MSRPAccumulator
         
         update_user_meta($user_id, self::USER_MSRP_TOTAL_META, $new_total);
         
-        // Update incoming total (Total Sales - MSRP)
-        $this->updateUserIncomingTotal($user_id);
+        // Update incoming total (Total Sales - MSRP) SOLO si NO es un reembolso
+        // Los reembolsos tienen su propio método de ajuste directo
+        if ($reason !== 'refund') {
+            $this->updateUserIncomingTotal($user_id);
+        }
         
-        // Log the change for audit purposes
         $this->logMSRPChange($user_id, $amount, $new_total, $related_id, $reason, 'subtract');
     }
 
@@ -452,6 +408,45 @@ class MSRPAccumulator
     }
 
     /**
+     * Log duplicate MSRP processing attempts
+     * 
+     * @param int $user_id User ID
+     * @param int $order_id Order ID
+     * @param string $status Current order status
+     * @return void
+     */
+    private function logDuplicateAttempt(int $user_id, int $order_id, string $status): void
+    {
+        $log_entry = [
+            'timestamp' => current_time('mysql'),
+            'user_id' => $user_id,
+            'order_id' => $order_id,
+            'status' => $status,
+            'message' => 'Duplicate MSRP processing attempt blocked',
+            'type' => 'duplicate_attempt'
+        ];
+        
+        // Get existing duplicate log
+        $duplicate_log = get_user_meta($user_id, '_msrp_duplicate_log', true);
+        if (!is_array($duplicate_log)) {
+            $duplicate_log = [];
+        }
+        
+        // Add new entry
+        $duplicate_log[] = $log_entry;
+        
+        // Keep only last 50 entries
+        if (count($duplicate_log) > 50) {
+            $duplicate_log = array_slice($duplicate_log, -50);
+        }
+        
+        update_user_meta($user_id, '_msrp_duplicate_log', $duplicate_log);
+        
+        // También loguearlo en el log regular para referencia
+        $this->logMSRPChange($user_id, 0, $this->getUserMSRPTotal($user_id), $order_id, 'duplicate_blocked', 'skip');
+    }
+
+    /**
      * Get user's current MSRP total
      * 
      * @param int $user_id User ID
@@ -487,6 +482,30 @@ class MSRPAccumulator
     }
 
     /**
+     * Get user's MSRP duplicate attempts log
+     * 
+     * @param int $user_id User ID
+     * @param int $limit Number of entries to return (default: 25)
+     * @return array Duplicate attempts log
+     */
+    public function getUserDuplicateLog(int $user_id, int $limit = 25): array
+    {
+        $log = get_user_meta($user_id, '_msrp_duplicate_log', true);
+        if (!is_array($log)) {
+            return [];
+        }
+        
+        // Return most recent entries first
+        $log = array_reverse($log);
+        
+        if ($limit > 0) {
+            return array_slice($log, 0, $limit);
+        }
+        
+        return $log;
+    }
+
+    /**
      * Recalculate user's MSRP total from all orders (for correction purposes)
      * 
      * @param int $user_id User ID
@@ -496,14 +515,8 @@ class MSRPAccumulator
     {
         // PREVENIR recálculos automáticos durante el procesamiento de reembolsos
         if (self::$processing_refund) {
-            error_log("🛑 MSRP RECALCULATE BLOCKED - Reembolso en proceso para usuario #{$user_id}");
             return (float) get_user_meta($user_id, self::USER_MSRP_TOTAL_META, true);
         }
-        
-        // DEBUGGING: Log cada vez que se llama al recálculo
-        $backtrace = wp_debug_backtrace_summary();
-        error_log("🚨 MSRP RECALCULATE CALLED - Usuario #{$user_id}");
-        error_log("🔍 Called from: {$backtrace}");
         
         $total = 0.0;
 
@@ -535,9 +548,6 @@ class MSRPAccumulator
 
         // Ensure total is not negative
         $total = max(0, $total);
-
-        // DEBUGGING: Log el resultado del recálculo
-        error_log("🔄 MSRP RECALCULATE RESULT - Usuario #{$user_id}: €{$total}");
 
         // Update user meta
         update_user_meta($user_id, self::USER_MSRP_TOTAL_META, $total);
@@ -593,11 +603,14 @@ class MSRPAccumulator
 
         $total = $this->getUserMSRPTotal($user_id);
         $log = $this->getUserMSRPLog($user_id, 10);
+        $duplicates = $this->getUserDuplicateLog($user_id, 5);
         
         wp_send_json_success([
             'user_id' => $user_id,
             'total' => $total,
-            'recent_changes' => $log
+            'recent_changes' => $log,
+            'duplicate_attempts' => $duplicates,
+            'duplicate_count' => count($duplicates)
         ]);
     }
 
@@ -627,18 +640,42 @@ class MSRPAccumulator
             $total_sales += (float) $order->get_total();
         }
         
-        // DEBUGGING: Log los valores para entender el cálculo
-        error_log("💰 INCOMING DEBUG - Usuario #{$user_id}:");
-        error_log("💰 INCOMING DEBUG - MSRP Total: €{$msrp_total}");
-        error_log("💰 INCOMING DEBUG - Total Sales: €{$total_sales}");
-        
         // Calcular incoming: MSRP - Total Sales (diferencia/ganancia)
         $incoming_total = max(0, $msrp_total - $total_sales); // No permitir valores negativos
         
-        error_log("💰 INCOMING DEBUG - Incoming calculado: €{$incoming_total} (€{$msrp_total} - €{$total_sales})");
-        
         // Guardar el valor calculado
         update_user_meta($user_id, self::USER_INCOMING_TOTAL_META, $incoming_total);
+    }
+
+    /**
+     * Update user's incoming total after a refund
+     * Ajusta directamente el incoming restando la diferencia del producto reembolsado
+     * 
+     * @param int $user_id User ID
+     * @param \WC_Order_Refund $refund Refund object
+     * @return void
+     */
+    private function updateUserIncomingAfterRefund(int $user_id, \WC_Order_Refund $refund): void
+    {
+        // Obtener el incoming total actual (antes del ajuste)
+        $current_incoming = (float) get_user_meta($user_id, self::USER_INCOMING_TOTAL_META, true);
+        
+        // Calcular el MSRP del reembolso (ya calculado anteriormente)
+        $refund_msrp = abs($this->calculateOrderMSRPTotal($refund));
+        
+        // Calcular el monto total del reembolso (precio de venta)
+        $refund_sales_amount = abs((float) $refund->get_total());
+        
+        // Calcular el ajuste: diferencia entre MSRP y precio de venta del reembolso
+        // Si MSRP > precio venta = perdemos beneficio
+        // Si MSRP < precio venta = ganamos beneficio (poco común en reembolsos)
+        $adjustment = $refund_msrp - $refund_sales_amount;
+        
+        // Aplicar el ajuste al incoming actual
+        $new_incoming = max(0, $current_incoming - $adjustment);
+        
+        // Guardar el nuevo valor
+        update_user_meta($user_id, self::USER_INCOMING_TOTAL_META, $new_incoming);
     }
 
     /**
@@ -742,8 +779,7 @@ class MSRPAccumulator
             return;
         }
         
-        // Log the deletion for debugging
-        error_log("MSRPAccumulator: Order #{$order_id} deleted, recalculating MSRP for user #{$customer_id}");
+
         
         // Recalculate the user's total MSRP from scratch
         $this->recalculateUserTotalsFromOrders($customer_id);
@@ -774,8 +810,7 @@ class MSRPAccumulator
             return;
         }
         
-        // Log the trash action for debugging
-        error_log("MSRPAccumulator: Order #{$post_id} moved to trash, recalculating MSRP for user #{$customer_id}");
+
         
         // Recalculate the user's total MSRP from scratch
         $this->recalculateUserTotalsFromOrders($customer_id);
@@ -806,8 +841,7 @@ class MSRPAccumulator
             return;
         }
         
-        // Log the permanent deletion for debugging
-        error_log("MSRPAccumulator: Order #{$post_id} permanently deleted, recalculating MSRP for user #{$customer_id}");
+
         
         // Recalculate the user's total MSRP from scratch
         $this->recalculateUserTotalsFromOrders($customer_id);
@@ -842,7 +876,7 @@ class MSRPAccumulator
         // Also recalculate incoming total
         $this->updateUserIncomingTotal($user_id);
         
-        error_log("MSRPAccumulator: Recalculated totals for user #{$user_id} - MSRP: €{$total_msrp}");
+
     }
 
     /**
@@ -870,7 +904,7 @@ class MSRPAccumulator
             ['%s']
         );
         
-        error_log("MSRPAccumulator RESET: Deleted {$deleted_msrp} MSRP totals and {$deleted_incoming} incoming totals");
+
         
         // Get ALL users (not just those with orders, since orders were deleted)
         $all_users = get_users([
@@ -879,14 +913,14 @@ class MSRPAccumulator
         ]);
         
         if (empty($all_users)) {
-            error_log("MSRPAccumulator RESET: No users found in the system");
+
             return;
         }
         
         $processed_users = 0;
         $total_users = count($all_users);
         
-        error_log("MSRPAccumulator RESET: Starting ZERO reset for {$total_users} total users (since orders were deleted)");
+
         
         // Set all users to ZERO since orders don't exist
         foreach ($all_users as $user_id) {
@@ -903,13 +937,6 @@ class MSRPAccumulator
             
             $processed_users++;
             
-            // Log progress every 50 users
-            if ($processed_users % 50 === 0 || $processed_users === $total_users) {
-                error_log("MSRPAccumulator RESET: Set to ZERO {$processed_users}/{$total_users} users");
-            }
         }
-        
-        error_log("MSRPAccumulator RESET: ✅ COMPLETE! Set {$processed_users} users to ZERO. REMEMBER TO COMMENT OUT THE RESET CALL!");
-        error_log("MSRPAccumulator RESET: ⚠️ Go to initHooks() and comment out the resetAllUserMSRPData() call");
     }
 }

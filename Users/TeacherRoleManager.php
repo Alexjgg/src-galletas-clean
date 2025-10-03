@@ -73,6 +73,12 @@ class TeacherRoleManager
         // Modificar acciones de fila en lista de usuarios para profesores
         add_filter('user_row_actions', array($this, 'modify_user_row_actions_for_teachers'), 10, 2);
 
+        // NUEVO: Filtrar acciones individuales de fila en órdenes para profesores
+        add_filter('woocommerce_admin_order_actions', array($this, 'filter_teacher_order_actions'), 10, 2);
+        
+        // 🎯 NUEVO: Ocultar botones de cambio de estado en la vista de pedidos individuales
+        add_action('admin_head', array($this, 'hide_order_status_buttons_for_teachers'));
+
         // Filtrar bulk actions para profesores (detectar página automáticamente)
         add_action('current_screen', array($this, 'register_teacher_bulk_action_filters'), 999);
         
@@ -97,6 +103,11 @@ class TeacherRoleManager
         add_action('wp_ajax_wpo_wcpdf_generate_pdf', array($this, 'block_teacher_ajax_actions'), 1);
         add_action('wp_ajax_mark_bank_transfer_paid', array($this, 'block_teacher_ajax_actions'), 1);
         add_action('wp_ajax_mark_bank_transfer_unpaid', array($this, 'block_teacher_ajax_actions'), 1);
+        
+        // 🎯 NUEVO: Bloquear TODOS los cambios de estado de pedidos para profesores
+        add_action('woocommerce_order_status_changed', array($this, 'prevent_teacher_order_status_changes'), 1, 4);
+        add_action('wp_ajax_woocommerce_mark_order_status', array($this, 'block_teacher_order_status_ajax'), 1);
+        add_action('load-edit.php', array($this, 'block_teacher_order_status_changes_via_url'), 1);
     }
 
     /**
@@ -1019,9 +1030,24 @@ class TeacherRoleManager
         // Mensaje para bulk actions denegadas
         if (isset($_GET['bulk_action_denied'])) {
             $denied_action = isset($_GET['denied_action']) ? sanitize_text_field($_GET['denied_action']) : 'unknown';
+            $reason = isset($_GET['reason']) ? sanitize_text_field($_GET['reason']) : 'general';
+            
             echo '<div class="notice notice-error is-dismissible">';
             echo '<p><strong>' . __('Bulk Action Denied', 'neve-child') . '</strong></p>';
-            echo '<p>' . sprintf(__('Teachers can only use "Mark as reviewed" action. The action "%s" is not permitted for your role.', 'neve-child'), $denied_action) . '</p>';
+            
+            if ($reason === 'status_change') {
+                echo '<p>' . sprintf(__('The action "%s" is not allowed for teachers. You cannot change order statuses.', 'neve-child'), esc_html($denied_action)) . '</p>';
+            } else {
+                echo '<p>' . sprintf(__('Teachers can only use "Mark as reviewed" action. The action "%s" is not permitted for your role.', 'neve-child'), $denied_action) . '</p>';
+            }
+            echo '</div>';
+        }
+
+        // 🎯 NUEVO: Mensaje para cambios de estado denegados
+        if (isset($_GET['status_change_denied'])) {
+            echo '<div class="notice notice-error is-dismissible">';
+            echo '<p><strong>' . __('Order Status Change Denied', 'neve-child') . '</strong></p>';
+            echo '<p>' . __('Teachers cannot change order status. You can only view orders and generate packing slips for your assigned school.', 'neve-child') . '</p>';
             echo '</div>';
         }
     }
@@ -1094,6 +1120,42 @@ class TeacherRoleManager
             unset($actions['view']);
             // Mantener $actions['edit'] para preservar acceso al perfil
         }
+
+        return $actions;
+    }
+
+    /**
+     * Filtrar acciones individuales de fila en órdenes para profesores
+     * Los profesores NO pueden cambiar estados de pedidos, solo pueden generar packing slips
+     */
+    public function filter_teacher_order_actions($actions, $order)
+    {
+        // Solo aplicar a profesores
+        if (!$this->is_user('teacher')) {
+            return $actions;
+        }
+
+        // Lista de acciones de cambio de estado que deben ser bloqueadas para profesores
+        $blocked_status_actions = [
+            'processing',      // Mark as Processing
+            'complete',        // Mark as Complete  
+            'on-hold',         // Mark as On Hold
+            'cancelled',       // Mark as Cancelled
+            'trash',           // Move to Trash
+            'view',            // View Order (acceso individual)
+            'edit',            // Edit Order (acceso individual)
+        ];
+
+        // Remover acciones bloqueadas
+        foreach ($blocked_status_actions as $blocked_action) {
+            if (isset($actions[$blocked_action])) {
+                unset($actions[$blocked_action]);
+            }
+        }
+
+        // Mantener solo acciones permitidas (packing slips, etc.)
+        // Las acciones de PDF que SÍ están permitidas se mantienen automáticamente
+        // ya que no están en la lista de bloqueadas
 
         return $actions;
     }
@@ -1313,10 +1375,7 @@ class TeacherRoleManager
             return $actions;
         }
 
-        // Debug: Ver qué viene en las acciones originales
-        if (defined('WP_DEBUG') && WP_DEBUG) {
-            error_log('[TeacherRoleManager] Original actions received: ' . print_r($actions, true));
-        }
+
 
         // NUEVA ESTRATEGIA: Filtrar las acciones existentes en lugar de reemplazar todo
         $filtered_actions = array();
@@ -1329,25 +1388,28 @@ class TeacherRoleManager
         }
         
         // Solo añadir las acciones permitidas para profesores
-        $allowed_actions = ['mark_reviewed'];
+        // Permitir: mark_reviewed y packing-slip (pero NO invoice, credit-note, etc.)
+        $allowed_actions = ['mark_reviewed', 'packing-slip'];
         
         foreach ($actions as $key => $value) {
+            // Permitir acciones específicamente listadas
             if (in_array($key, $allowed_actions) || $key === '-1' || $key === '') {
+                $filtered_actions[$key] = $value;
+            }
+            // Permitir acciones de packing slip con diferentes variantes de nombres
+            elseif (strpos($key, 'packing') !== false || strpos($key, 'delivery') !== false) {
                 $filtered_actions[$key] = $value;
             }
         }
         
-        // Debug: Ver qué estamos devolviendo
-        if (defined('WP_DEBUG') && WP_DEBUG) {
-            error_log('[TeacherRoleManager] Filtered actions returned: ' . print_r($filtered_actions, true));
-        }
+
 
         return $filtered_actions;
     }
 
     /**
      * Intercepta el procesamiento de bulk actions para profesores
-     * Bloquea cualquier acción que no sea 'mark_reviewed'
+     * Permite 'mark_reviewed' y acciones de packing-slip, bloquea facturas y notas de crédito
      */
     public function intercept_teacher_bulk_actions($redirect_url, $action, $post_ids)
     {
@@ -1356,8 +1418,15 @@ class TeacherRoleManager
             return $redirect_url;
         }
 
-        // Solo permitir 'mark_reviewed' para profesores
-        if ($action !== 'mark_reviewed') {
+        // Acciones permitidas para profesores
+        $allowed_actions = ['mark_reviewed', 'packing-slip'];
+        
+        // Verificar si la acción está permitida o es relacionada con packing slips
+        $is_allowed = in_array($action, $allowed_actions) || 
+                     strpos($action, 'packing') !== false || 
+                     strpos($action, 'delivery') !== false;
+
+        if (!$is_allowed) {
             // Bloquear la acción y redirigir con error
             $redirect_url = add_query_arg(
                 array(
@@ -1453,7 +1522,6 @@ class TeacherRoleManager
                 'mark_bank_transfers_paid',
                 'mark_bank_transfers_unpaid',
                 'invoice',
-                'packing-slip',
                 'mark_processing',
                 'mark_on-hold',
                 'mark_completed',
@@ -1479,6 +1547,28 @@ class TeacherRoleManager
                 
                 wp_redirect($redirect_url);
                 exit;
+            }
+            
+            // 🎯 NUEVO: Bloquear CUALQUIER acción que contenga palabras relacionadas con estados
+            // EXCEPCIÓN: mark_reviewed SÍ está permitida para profesores
+            if ($action !== 'mark_reviewed') {
+                $status_keywords = ['mark_', 'complete', 'process', 'hold', 'cancel', 'deliver', 'entrega'];
+                foreach ($status_keywords as $keyword) {
+                    if (strpos($action, $keyword) !== false) {
+                        $redirect_url = remove_query_arg(array('action', 'action2'));
+                        $redirect_url = add_query_arg(
+                            array(
+                                'bulk_action_denied' => 1,
+                                'denied_action' => $action,
+                                'reason' => 'status_change'
+                            ),
+                            $redirect_url
+                        );
+                        
+                        wp_redirect($redirect_url);
+                        exit;
+                    }
+                }
             }
         }
     }
@@ -1518,7 +1608,6 @@ class TeacherRoleManager
             'mark_bank_transfers_paid',
             'mark_bank_transfers_unpaid',
             'invoice',
-            'packing-slip',
             'mark_processing',
             'mark_on-hold',
             'mark_completed',
@@ -1599,7 +1688,6 @@ class TeacherRoleManager
                 'mark_bank_transfers_paid',
                 'mark_bank_transfers_unpaid',
                 'invoice',
-                'packing-slip',
                 'mark_processing',
                 'mark_on-hold',
                 'mark_completed',
@@ -1650,18 +1738,13 @@ class TeacherRoleManager
         jQuery(document).ready(function($) {
             // Función para limpiar duplicados en bulk actions - MUY AGRESIVA
             function cleanBulkActionsDuplicates() {
-                console.log('[TeacherRoleManager] Starting bulk actions cleanup...');
-                
                 // Seleccionar todos los selects de bulk actions
                 $('select[name="action"], select[name="action2"]').each(function() {
                     var $select = $(this);
                     var selectId = $select.attr('id') || 'unknown';
                     
-                    console.log('[TeacherRoleManager] Processing select: ' + selectId);
-                    
                     // Encontrar todas las opciones actuales
                     var allOptions = $select.find('option');
-                    console.log('[TeacherRoleManager] Found ' + allOptions.length + ' options');
                     
                     // Crear array con opciones limpias para profesores
                     var cleanOptions = [];
@@ -1674,32 +1757,26 @@ class TeacherRoleManager
                         var value = $option.val();
                         var text = $option.text().trim();
                         
-                        console.log('[TeacherRoleManager] Found option: value="' + value + '", text="' + text + '"');
-                        
                         // Para la opción por defecto (-1 o vacío), mantener solo una
                         if ((value === '-1' || value === '') && !hasDefaultOption) {
                             cleanOptions.push({value: '-1', text: text});
                             hasDefaultOption = true;
-                            console.log('[TeacherRoleManager] Keeping default option: ' + text);
                         }
                         // Para mark_reviewed, mantener solo una
                         else if (value === 'mark_reviewed' && !hasMarkReviewed) {
                             cleanOptions.push({value: value, text: text});
                             hasMarkReviewed = true;
-                            console.log('[TeacherRoleManager] Keeping mark_reviewed option');
                         }
                     });
                     
                     // Si no encontramos la opción por defecto, añadirla
                     if (!hasDefaultOption) {
                         cleanOptions.unshift({value: '-1', text: 'Acciones en lote'});
-                        console.log('[TeacherRoleManager] Added missing default option');
                     }
                     
                     // Si no encontramos mark_reviewed, añadirla
                     if (!hasMarkReviewed) {
                         cleanOptions.push({value: 'mark_reviewed', text: 'Marcar como revisado'});
-                        console.log('[TeacherRoleManager] Added missing mark_reviewed option');
                     }
                     
                     // Limpiar completamente el select
@@ -1709,11 +1786,7 @@ class TeacherRoleManager
                     $.each(cleanOptions, function(index, option) {
                         $select.append('<option value="' + option.value + '">' + option.text + '</option>');
                     });
-                    
-                    console.log('[TeacherRoleManager] Rebuilt select with ' + cleanOptions.length + ' clean options');
                 });
-                
-                console.log('[TeacherRoleManager] Bulk actions cleanup completed');
             }
             
             // Ejecutar limpieza inmediatamente
@@ -1755,6 +1828,243 @@ class TeacherRoleManager
                 });
                 
                 // Observar cambios en el documento
+                observer.observe(document.body, {
+                    childList: true,
+                    subtree: true
+                });
+            }
+        });
+        </script>
+        <?php
+    }
+
+    /**
+     * 🎯 NUEVO: Prevenir cambios de estado NO AUTORIZADOS por profesores
+     * Hook: woocommerce_order_status_changed - Se ejecuta cuando cambia el estado
+     * PERMITE: reviewed (revisado)
+     * BLOQUEA: processing, completed, on-hold, cancelled, etc.
+     */
+    public function prevent_teacher_order_status_changes($order_id, $old_status, $new_status, $order)
+    {
+        // Solo aplicar a profesores
+        if (!$this->is_user('teacher')) {
+            return;
+        }
+
+        // Estados PERMITIDOS para profesores
+        $allowed_statuses = ['reviewed', 'wc-reviewed'];
+        
+        // Si el nuevo estado está permitido, dejarlo pasar
+        if (in_array($new_status, $allowed_statuses)) {
+            return;
+        }
+
+        // Si un profesor está intentando cambiar a un estado NO permitido, revertir
+        if (current_user_can('edit_shop_orders') && $this->is_user('teacher')) {
+            // Revertir al estado anterior
+            $order = wc_get_order($order_id);
+            if ($order) {
+                // Remover temporalmente este hook para evitar bucle infinito
+                remove_action('woocommerce_order_status_changed', array($this, 'prevent_teacher_order_status_changes'), 1);
+                
+                // Revertir al estado anterior
+                $order->update_status($old_status, sprintf('Estado revertido - Los profesores solo pueden cambiar a estado "revisado". Intento de cambio a "%s" fue bloqueado.', $new_status));
+                
+                // Volver a añadir el hook
+                add_action('woocommerce_order_status_changed', array($this, 'prevent_teacher_order_status_changes'), 1, 4);
+                
+                // Mostrar mensaje de error específico
+                add_action('admin_notices', function() use ($new_status) {
+                    echo '<div class="notice notice-error"><p><strong>Error:</strong> Los profesores solo pueden cambiar pedidos a estado "Revisado". El cambio a "' . esc_html($new_status) . '" no está permitido.</p></div>';
+                });
+            }
+        }
+    }
+
+    /**
+     * 🎯 NUEVO: Bloquear cambios de estado NO AUTORIZADOS via AJAX para profesores
+     * PERMITE: mark_reviewed
+     * BLOQUEA: otros cambios de estado
+     */
+    public function block_teacher_order_status_ajax()
+    {
+        // Solo aplicar a profesores
+        if (!$this->is_user('teacher')) {
+            return;
+        }
+
+        // Verificar qué acción específica se está ejecutando
+        $action_data = $_POST['action'] ?? $_GET['action'] ?? '';
+        
+        // Si es mark_reviewed, permitir que continúe
+        if ($action_data === 'mark_reviewed') {
+            return;
+        }
+
+        // Para cualquier otra acción AJAX de cambio de estado, bloquear
+        wp_die(json_encode(array(
+            'success' => false,
+            'message' => 'Los profesores solo pueden cambiar pedidos a estado "Revisado". Esta acción no está permitida.'
+        )));
+    }
+
+    /**
+     * 🎯 NUEVO: Bloquear cambios de estado via URL para profesores
+     */
+    public function block_teacher_order_status_changes_via_url()
+    {
+        // Solo aplicar a profesores
+        if (!$this->is_user('teacher')) {
+            return;
+        }
+
+        // Verificar si se está intentando cambiar estado via URL
+        if (isset($_GET['action']) || isset($_POST['action']) || isset($_POST['action2'])) {
+            $action = $_GET['action'] ?? $_POST['action'] ?? $_POST['action2'] ?? '';
+            
+            // Lista de acciones de cambio de estado bloqueadas
+            $status_change_actions = [
+                'mark_processing',
+                'mark_completed', 
+                'mark_complete',
+                'mark_on-hold',
+                'mark_cancelled',
+                'mark_warehouse',
+                'mark_prepared',
+                'mark_customized',
+                'mark_pickup',
+                'mark_estimate',
+                'mark_delivered',
+                'mark_entregado'
+            ];
+
+            if (in_array($action, $status_change_actions)) {
+                // Redirigir con mensaje de error
+                wp_redirect(admin_url('edit.php?post_type=shop_order&status_change_denied=1'));
+                exit;
+            }
+        }
+    }
+
+    /**
+     * 🎯 NUEVO: Ocultar botones de cambio de estado para profesores
+     * Oculta los botones "Completado", "Procesando", etc. en la vista de pedidos
+     */
+    public function hide_order_status_buttons_for_teachers()
+    {
+        // Solo aplicar a profesores
+        if (!$this->is_user('teacher')) {
+            return;
+        }
+
+        // Solo en páginas de pedidos
+        $screen = get_current_screen();
+        if (!$screen || (!in_array($screen->id, ['shop_order', 'woocommerce_page_wc-orders', 'edit-shop_order']))) {
+            return;
+        }
+
+        ?>
+        <style type="text/css">
+        /* Ocultar botones de cambio de estado en vista de lista de pedidos */
+        .wc-action-button-group,
+        .wc-action-button-complete,
+        .wc-action-button-processing,
+        .wc-action-button-on-hold,
+        .wc-action-button-cancelled,
+        .wc-action-button-warehouse,
+        .wc-action-button-prepared,
+        .wc-action-button-customized,
+        .wc-action-button-pickup,
+        .wc-action-button-estimate,
+        .wc-action-button-delivered {
+            display: none !important;
+        }
+
+        /* Ocultar el grupo completo de botones de estado si existe */
+        .wc-order-status-actions,
+        .order-status-actions,
+        .woocommerce-order-status-actions {
+            display: none !important;
+        }
+
+        /* Específicamente ocultar botones con texto de estado */
+        .button[href*="woocommerce_mark_order_status"],
+        .button[href*="status=completed"],
+        .button[href*="status=processing"],
+        .button[href*="status=on-hold"],
+        .button[href*="status=cancelled"],
+        .button[href*="status=warehouse"],
+        .button[href*="status=prepared"],
+        .button[href*="status=customized"],
+        .button[href*="status=pickup"],
+        .button[href*="status=estimate"],
+        .button[href*="status=delivered"] {
+            display: none !important;
+        }
+
+        /* Ocultar metabox de acciones de pedido si existe */
+        #woocommerce-order-actions,
+        .woocommerce_page_wc-orders #woocommerce-order-actions {
+            display: none !important;
+        }
+
+        /* Mantener visible solo el botón de "Mark as reviewed" si existe */
+        .button[href*="mark_reviewed"],
+        .wc-action-button[href*="reviewed"] {
+            display: inline-block !important;
+        }
+        </style>
+
+        <script type="text/javascript">
+        jQuery(document).ready(function($) {
+            // Remover botones dinámicos que puedan aparecer después de cargar la página
+            function hideStatusButtons() {
+                // Ocultar botones por texto content
+                $('a.button, button').each(function() {
+                    var buttonText = $(this).text().toLowerCase();
+                    var buttonHref = $(this).attr('href') || '';
+                    
+                    // Lista de textos de botones a ocultar
+                    var hiddenTexts = ['completado', 'completed', 'procesando', 'processing', 'en espera', 'on-hold', 'cancelado', 'cancelled'];
+                    
+                    // Ocultar si contiene texto de estado (excepto reviewed/revisado)
+                    for (var i = 0; i < hiddenTexts.length; i++) {
+                        if (buttonText.indexOf(hiddenTexts[i]) !== -1 && buttonText.indexOf('revisado') === -1 && buttonText.indexOf('reviewed') === -1) {
+                            $(this).hide();
+                            break;
+                        }
+                    }
+                    
+                    // Ocultar si el href contiene acciones de cambio de estado
+                    if (buttonHref.indexOf('woocommerce_mark_order_status') !== -1 && buttonHref.indexOf('reviewed') === -1) {
+                        $(this).hide();
+                    }
+                });
+
+                // Ocultar contenedores específicos
+                $('.wc-action-button-group').each(function() {
+                    var hasOnlyHiddenButtons = true;
+                    $(this).find('a.button').each(function() {
+                        if ($(this).is(':visible') && $(this).attr('href') && $(this).attr('href').indexOf('reviewed') === -1) {
+                            hasOnlyHiddenButtons = false;
+                        }
+                    });
+                    
+                    if (hasOnlyHiddenButtons) {
+                        $(this).hide();
+                    }
+                });
+            }
+
+            // Ejecutar al cargar y cuando cambie el DOM
+            hideStatusButtons();
+            
+            // Observer para cambios dinámicos en el DOM
+            if (window.MutationObserver) {
+                var observer = new MutationObserver(function(mutations) {
+                    hideStatusButtons();
+                });
+                
                 observer.observe(document.body, {
                     childList: true,
                     subtree: true

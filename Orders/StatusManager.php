@@ -35,6 +35,17 @@ class StatusManager
     ];
 
     /**
+     * ORDEN DE PROGRESIÓN DE ESTADOS DE PEDIDOS MAESTROS
+     * Los pedidos maestros solo pueden avanzar, nunca retroceder
+     */
+    private const MASTER_ORDER_STATUS_PROGRESSION = [
+        'master-order'   => 0,   // Estado inicial - validado
+        'mast-warehs'    => 1,   // Almacén
+        'mast-prepared'  => 2,   // Preparado  
+        'mast-complete'  => 3    // Completo (final)
+    ];
+
+    /**
      * Constructor
      */
     public function __construct()
@@ -123,6 +134,12 @@ class StatusManager
         
         // Manejar transiciones automáticas de estados en pedidos hijos
         add_action('woocommerce_order_status_changed', [$this, 'handleMasterOrderStateTransitions'], 10, 4);
+        
+        // PROTECCIÓN CRÍTICA: Interceptar TODOS los cambios de estado no autorizados
+        // PRIORIDAD 1: Debe ejecutarse ANTES que MasterOrderManager (prioridad 10)
+        add_action('woocommerce_order_status_changed', [$this, 'protectUnauthorizedStatusChanges'], 1, 4);
+        
+        // Ya no necesitamos el filtro complejo - la protección en MasterOrderManager es suficiente
         
         // Master Order bulk actions - DISABLED to avoid duplicates with MasterOrderManager
         // add_filter('bulk_actions-woocommerce_page_wc-orders', [$this, 'addMasterOrderBulkActions']);
@@ -302,6 +319,12 @@ class StatusManager
             $order = wc_get_order($post_id);
             
             if ($order && $order->get_status() !== \SchoolManagement\Shared\Constants::STATUS_REVIEWED) {
+                // REGLA ESTRICTA: Solo pedidos en estado 'processing' pueden pasar a 'reviewed'
+                // NO permitir 'completed' → 'reviewed' (es un retroceso no deseado)
+                if ($order->get_status() !== 'processing') {
+                    continue;
+                }
+                
                 $order->update_status(\SchoolManagement\Shared\Constants::STATUS_REVIEWED, __('Status changed to reviewed', 'neve-child'));
                 $changed++;
             }
@@ -422,6 +445,16 @@ class StatusManager
                 esc_html($bulk_action_notice)
             );
             delete_transient('master_order_bulk_action_notice');
+        }
+
+        // Notificación de bloqueo de cambio de estado no autorizado
+        $status_blocked_notice = get_transient('status_change_blocked_notice');
+        if ($status_blocked_notice) {
+            printf(
+                '<div class="notice notice-error is-dismissible"><p><strong>Status Change Blocked:</strong> %s</p></div>',
+                esc_html($status_blocked_notice)
+            );
+            delete_transient('status_change_blocked_notice');
         }
     }
 
@@ -604,6 +637,43 @@ class StatusManager
     }
 
     /**
+     * Verificar si un cambio de estado representa un retroceso en la progresión
+     * 
+     * @param string $old_status Estado actual
+     * @param string $new_status Estado destino
+     * @return bool True si es un retroceso, false si es válido
+     */
+    private function isMasterOrderStatusRegression(string $old_status, string $new_status): bool
+    {
+        // Si alguno de los estados no está en la progresión, permitir (será manejado por otra validación)
+        if (!isset(self::MASTER_ORDER_STATUS_PROGRESSION[$old_status]) || 
+            !isset(self::MASTER_ORDER_STATUS_PROGRESSION[$new_status])) {
+            return false;
+        }
+
+        // Es regresión si el nuevo estado tiene un número menor que el actual
+        return self::MASTER_ORDER_STATUS_PROGRESSION[$new_status] < self::MASTER_ORDER_STATUS_PROGRESSION[$old_status];
+    }
+
+    /**
+     * Obtener la etiqueta amigable de un estado de pedido maestro
+     * 
+     * @param string $status Estado del pedido
+     * @return string Etiqueta amigable
+     */
+    private function getMasterOrderStatusLabel(string $status): string
+    {
+        $labels = [
+            'master-order'   => __('Master Validated', 'neve-child'),
+            'mast-warehs'    => __('Master Warehouse', 'neve-child'), 
+            'mast-prepared'  => __('Master Prepared', 'neve-child'),
+            'mast-complete'  => __('Master Complete', 'neve-child')
+        ];
+
+        return $labels[$status] ?? $status;
+    }
+
+    /**
      * Obtener configuración de estados para pedidos maestros
      */
     public function getMasterOrderStatuses(): array
@@ -705,20 +775,32 @@ class StatusManager
             return;
         }
 
-        // Permitir solo estados de master order
+        $revert_change = false;
+        $error_message = '';
+
+        // 1. Verificar que sea un estado válido para master orders
         if (!in_array($new_status, self::MASTER_ORDER_STATUSES)) {
+            $revert_change = true;
+            $error_message = __('Status change blocked: Master validated orders can only use master-order statuses (master-order, mast-warehs, mast-prepared, mast-complete).', 'neve-child');
+        }
+        
+        // 2. ÚNICA RESTRICCIÓN: No permitir volver a 'master-order' una vez que se ha salido de él
+        if (!$revert_change && $new_status === 'master-order' && $old_status !== 'master-order') {
+            $revert_change = true;
+            $error_message = __('Status change blocked: Master validated orders cannot return to "Master Validated" status once they have progressed beyond it.', 'neve-child');
+        }
+
+        // Si hay que revertir el cambio
+        if ($revert_change) {
             // Revertir al estado anterior
             remove_action('woocommerce_order_status_changed', [$this, 'protectMasterOrderStatusChanges'], 1);
             
-            $order->update_status($old_status, __('Status change blocked: Master validated orders can only use master-order statuses.', 'neve-child'));
+            $order->update_status($old_status, $error_message);
             
             add_action('woocommerce_order_status_changed', [$this, 'protectMasterOrderStatusChanges'], 1, 4);
             
-            // Mostrar aviso
-            set_transient('master_order_status_protection_notice', 
-                __('Master validated orders can only use master-order, mast-warehs, or mast-complete statuses.', 'neve-child'), 
-                30
-            );
+            // Mostrar aviso al usuario
+            set_transient('master_order_status_protection_notice', $error_message, 30);
         }
     }
 
@@ -754,16 +836,30 @@ class StatusManager
         $new_status = $master_actions[$action];
         $changed = 0;
         $protected = 0;
+        $regressed = 0;
 
         foreach ($post_ids as $post_id) {
             if ($this->isMasterOrder($post_id)) {
                 $order = wc_get_order($post_id);
                 if ($order && $order->get_status() !== $new_status) {
-                    $order->update_status($new_status, sprintf(
-                        __('Status changed to %s via bulk action', 'neve-child'),
-                        $new_status
-                    ));
-                    $changed++;
+                    $current_status = $order->get_status();
+                    
+                    // ÚNICA RESTRICCIÓN: No permitir volver a 'master-order' una vez que se ha salido de él
+                    if ($new_status === 'master-order' && $current_status !== 'master-order') {
+                        // No permitir volver a master-order
+                        $regressed++;
+                        $order->add_order_note(sprintf(
+                            __('Bulk action blocked: Cannot return to "Master Validated" status once progressed beyond it. Current status: "%s"', 'neve-child'),
+                            $this->getMasterOrderStatusLabel($current_status)
+                        ));
+                    } else {
+                        // Permitir todos los demás cambios
+                        $order->update_status($new_status, sprintf(
+                            __('Status changed to %s via bulk action', 'neve-child'),
+                            $new_status
+                        ));
+                        $changed++;
+                    }
                 }
             } else {
                 $protected++;
@@ -781,6 +877,12 @@ class StatusManager
             $messages[] = sprintf(
                 _n('%d regular order was protected (master actions only apply to master validated orders).', '%d regular orders were protected (master actions only apply to master validated orders).', $protected, 'neve-child'),
                 $protected
+            );
+        }
+        if ($regressed > 0) {
+            $messages[] = sprintf(
+                _n('%d master validated order was blocked from returning to "Master Validated" status.', '%d master validated orders were blocked from returning to "Master Validated" status.', $regressed, 'neve-child'),
+                $regressed
             );
         }
 
@@ -821,7 +923,6 @@ class StatusManager
     {
         // Esto es un helper para re-procesar acciones en pedidos regulares
         // Delegar al sistema normal de WooCommerce
-        // Por ahora solo loggeamos para debug
     }
 
     /**
@@ -841,9 +942,100 @@ class StatusManager
     }
 
     /**
+     * Verificar si una transición de estado en pedidos hijos es hacia atrás
+     * 
+     * @param string $current_status Estado actual del hijo
+     * @param string $target_status Estado objetivo del hijo  
+     * @return bool True si es retroceso, false si es avance
+     */
+    private function isBackwardsTransitionForChildren(string $current_status, string $target_status): bool
+    {
+        // Orden de progresión típico para pedidos hijos
+        $child_progression = [
+            'pending'     => 0,
+            'processing'  => 1,
+            'reviewed'    => 2,
+            'warehouse'   => 3,
+            'prepared'    => 4,
+            'completed'   => 5,
+        ];
+        
+        $current_level = $child_progression[$current_status] ?? -1;
+        $target_level = $child_progression[$target_status] ?? -1;
+        
+        // Si no conocemos el nivel, asumir que no es retroceso
+        if ($current_level === -1 || $target_level === -1) {
+            return false;
+        }
+        
+        return $target_level < $current_level;
+    }
+
+    /**
+     * Proteger cambios de estado no autorizados
+     * CRÍTICO: 
+     * 1. Solo permitir processing → reviewed, bloquear completed → reviewed
+     * 2. No permitir cambios desde master-complete hacia estados anteriores
+     * PRIORIDAD 1: SIMPLE - Solo revertir y mostrar mensaje
+     */
+    public function protectUnauthorizedStatusChanges(int $order_id, string $old_status, string $new_status, $order): void
+    {
+        // No interceptar master orders (tienen sus propias reglas de transición)
+        if ($order->get_meta('_is_master_order') === 'yes') {
+            return;
+        }
+
+        $error_message = '';
+        $should_block = false;
+
+        // REGLA 1: Solo permitir processing → reviewed
+        if ($new_status === \SchoolManagement\Shared\Constants::STATUS_REVIEWED) {
+            $allowed_previous_statuses = ['processing'];
+            
+            if (!in_array($old_status, $allowed_previous_statuses)) {
+                $should_block = true;
+                $error_message = sprintf(
+                    __('Status change blocked: Orders can only change to "Validated" from "Processing" status. Current status "%s" is not allowed.', 'neve-child'),
+                    $old_status
+                );
+            }
+        }
+
+        // REGLA 2: No permitir cambios desde master-complete hacia estados anteriores
+        if ($old_status === 'mast-complete') {
+            $should_block = true;
+            $error_message = sprintf(
+                __('Status change blocked: Orders in "Master Complete" status cannot be changed to previous states. Cannot change to "%s".', 'neve-child'),
+                $new_status
+            );
+        }
+
+        // Si se debe bloquear el cambio, revertir
+        if ($should_block) {
+            // Evitar loops infinitos
+            static $reverting = [];
+            if (isset($reverting[$order_id])) {
+                return;
+            }
+            $reverting[$order_id] = true;
+            
+            // Revertir al estado anterior
+            remove_action('woocommerce_order_status_changed', [$this, 'protectUnauthorizedStatusChanges'], 1);
+            
+            $order->update_status($old_status);
+            
+            add_action('woocommerce_order_status_changed', [$this, 'protectUnauthorizedStatusChanges'], 1, 4);
+            
+            unset($reverting[$order_id]);
+        }
+    }
+
+    /**
      * Manejar transiciones automáticas de estados en pedidos hijos cuando cambia el Master Order
+     * - Master pasa a mast-warehs → hijos pasan a warehouse
      * - Master pasa a mast-prepared → hijos pasan a prepared 
      * - Master pasa a mast-complete → hijos pasan a completed
+     * - Maneja tanto avances como retrocesos del master
      */
     public function handleMasterOrderStateTransitions(int $order_id, string $old_status, string $new_status, $order): void
     {
@@ -865,7 +1057,11 @@ class StatusManager
             $transition_description = '';
 
             // Determinar la transición según el nuevo estado del master
-            if ($new_status === 'mast-prepared') {
+            // NUEVO: Manejar tanto avances como retrocesos
+            if ($new_status === 'mast-warehs') {
+                $target_status = 'warehouse';
+                $transition_description = 'Warehouse';
+            } elseif ($new_status === 'mast-prepared') {
                 $target_status = 'prepared';
                 $transition_description = 'Prepared';
             } elseif ($new_status === 'mast-complete') {
@@ -873,6 +1069,7 @@ class StatusManager
                 $transition_description = 'Completed';
             } else {
                 // No es una transición que requiera cambios automáticos
+                // (master-order no cambia automáticamente los hijos)
                 return;
             }
 
@@ -884,13 +1081,29 @@ class StatusManager
 
                 $current_child_status = $child_order->get_status();
                 
-                // Solo cambiar si no está ya en el estado objetivo o completado
-                if ($current_child_status !== $target_status && $current_child_status !== 'completed') {
-                    $child_order->update_status($target_status, 
-                        sprintf(__('Status automatically changed to %s after master validated order #%d changed to %s', 'neve-child'), 
-                            $transition_description, $order_id, $new_status)
-                    );
-                    $changed_children++;
+                // Lógica mejorada para manejar avances y retrocesos
+                if ($current_child_status !== $target_status) {
+                    // Verificar si es un avance o retroceso
+                    $is_backwards_transition = $this->isBackwardsTransitionForChildren($current_child_status, $target_status);
+                    
+                    // Permitir el cambio salvo en casos específicos
+                    $should_skip = false;
+                    
+                    // No retroceder desde 'completed' a menos que sea explícitamente necesario
+                    if ($current_child_status === 'completed' && $target_status !== 'completed') {
+                        $should_skip = true;
+                    }
+                    
+                    if (!$should_skip) {
+                        $change_reason = $is_backwards_transition ? 'reverted' : 'automatically changed';
+                        $child_order->update_status($target_status, 
+                            sprintf(__('Status %s to %s after master validated order #%d changed to %s', 'neve-child'), 
+                                $change_reason, $transition_description, $order_id, $new_status)
+                        );
+                        $changed_children++;
+                    } else {
+                        $skipped_children++;
+                    }
                 } else {
                     $skipped_children++;
                 }
@@ -915,7 +1128,7 @@ class StatusManager
             }
 
         } catch (\Exception $e) {
-            // Error silencioso - solo log si es necesario para debug
+            // Error silencioso
         }
     }
 

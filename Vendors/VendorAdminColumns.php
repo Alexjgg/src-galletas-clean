@@ -6,13 +6,12 @@
  * incluyendo totales de dinero por vendor
  * 
  * LÓGICA DE PREVENCIÓN DE DUPLICACIONES:
- * Este sistema maneja tanto Master Orders como órdenes individuales, 
- * implementando la misma lógica inteligente que SchoolReport.php para evitar duplicaciones:
+ * Este sistema cuenta SOLO órdenes individuales para evitar duplicaciones:
  * 
- * - Si una orden individual tiene una Master Order padre activa, se excluye del conteo
- * - Solo se cuentan las Master Orders O las órdenes individuales sin Master Order padre
- * - Esto asegura que los totales de dinero no se cuenten dos veces
- * - Utiliza los mismos estados de orden que el sistema de reportes de escuelas
+ * - Excluye completamente las Master Orders del conteo
+ * - Solo cuenta órdenes individuales que NO pertenecen a una Master Order
+ * - Esto previene la doble contabilidad ya que las Master Orders son contenedores 
+ * - Las órdenes individuales contienen los valores reales de productos y totales
  * 
  * @package SchoolManagement\Vendors
  * @since 1.0.0
@@ -38,17 +37,11 @@ class VendorAdminColumns
     private const SCHOOL_POST_TYPE = 'coo_school';
 
     /**
-     * Estados de órdenes por defecto para vendors (similar a SchoolReport)
-     * Incluye Master Orders y órdenes individuales relevantes
+     * Estados de órdenes individuales para vendors
+     * EXCLUYE Master Orders para evitar duplicaciones
      */
     const DEFAULT_ORDER_STATUSES = [
-        // Estados de Master Orders
-        'wc-master-order' => 'master-order',
-        'wc-mast-warehs' => 'mast-warehs',
-        'wc-mast-prepared' => 'mast-prepared',
-        'wc-mast-complete' => 'mast-complete',
-        
-        // Estados de órdenes individuales específicos
+        // Solo estados de órdenes individuales
         'wc-processing' => 'processing',
         'wc-reviewed' => 'reviewed',
         'wc-warehouse' => 'warehouse',
@@ -186,33 +179,15 @@ class VendorAdminColumns
         }
     }
 
-    /**
-     * Filtrar solo estados de Master Orders de una lista de estados
-     */
-    private function getMasterOrderStatuses(array $statuses): array
-    {
-        return array_filter($statuses, function($status) {
-            return strpos($status, 'master') !== false || strpos($status, 'mast-') !== false;
-        });
-    }
+
 
     /**
-     * Generar condición SQL para evitar duplicaciones con Master Orders
-     * Esta es la misma lógica que usa SchoolReport.php
+     * Generar condición SQL para evitar órdenes que pertenecen a Master Orders
+     * Solo contar órdenes individuales sin Master Order padre
      */
-    private function getDuplicationPreventionCondition(array $query_statuses): string
+    private function getDuplicationPreventionCondition(): string
     {
-        $master_statuses = $this->getMasterOrderStatuses($query_statuses);
-        
-        if (empty($master_statuses)) {
-            // Si no hay estados de Master Orders, no necesitamos lógica de duplicación
-            return "TRUE";
-        }
-        
-        return "(
-            parent_order.id IS NULL  -- No tiene Master Order padre
-            OR o.status LIKE '%master%' OR o.status LIKE '%mast-%'  -- O es una Master Order
-        )";
+        return "parent_order.id IS NULL";  // Solo órdenes SIN Master Order padre
     }
 
     /**
@@ -234,24 +209,15 @@ class VendorAdminColumns
     {
         global $wpdb;
 
-        // Log for debug
-        error_log("=== DEBUG getTotalSalesColumn for vendor_id: $vendor_id ===");
-        error_log("ORDER_META_VENDOR_ID constant: " . Constants::ORDER_META_VENDOR_ID);
-
-        // Get statuses for query (includes Master Orders)
+        // Get statuses for query (only individual orders)
         $query_statuses = $this->getOrderStatusesForQuery();
-        $master_statuses = $this->getMasterOrderStatuses($query_statuses);
-        $duplication_condition = $this->getDuplicationPreventionCondition($query_statuses);
+        $duplication_condition = $this->getDuplicationPreventionCondition();
 
-        // JOIN to avoid duplications with Master Orders (same logic as SchoolReport)
-        $master_order_join = "";
-        if (!empty($master_statuses)) {
-            $master_order_join = "
+        // JOIN to exclude orders that belong to Master Orders
+        $master_order_join = "
             LEFT JOIN {$wpdb->prefix}wc_orders_meta parent_meta ON o.id = parent_meta.order_id 
                 AND parent_meta.meta_key = 'master_order_id'
-            LEFT JOIN {$wpdb->prefix}wc_orders parent_order ON parent_meta.meta_value = parent_order.id
-                AND parent_order.status IN ('" . implode("','", $master_statuses) . "')";
-        }
+            LEFT JOIN {$wpdb->prefix}wc_orders parent_order ON parent_meta.meta_value = parent_order.id";
 
         // In HPOS, total is in main table wp_wc_orders
         $query = $wpdb->prepare("
@@ -268,26 +234,7 @@ class VendorAdminColumns
             $vendor_id
         );
 
-        error_log("Query executed with duplication prevention: " . str_replace(["\n", "    "], [" ", " "], $query));
         $total = $wpdb->get_var($query);
-        error_log("Result with anti-duplication logic: " . var_export($total, true));
-
-        // Check difference with simple query (for debug only)
-        $simple_query = $wpdb->prepare("
-            SELECT COALESCE(SUM(CAST(o.total_amount AS DECIMAL(10,2))), 0) as total_sales
-            FROM {$wpdb->prefix}wc_orders o
-            INNER JOIN {$wpdb->prefix}wc_orders_meta om_vendor ON o.id = om_vendor.order_id
-            WHERE om_vendor.meta_key = %s
-                AND om_vendor.meta_value = %s
-                AND o.status NOT IN ('wc-cancelled', 'wc-refunded', 'wc-failed')
-        ", Constants::ORDER_META_VENDOR_ID, $vendor_id);
-        
-        $simple_total = $wpdb->get_var($simple_query);
-        error_log("Comparison - Simple total (without anti-duplication): " . var_export($simple_total, true));
-        error_log("Comparison - Difference: " . (floatval($simple_total) - floatval($total)));
-
-        error_log("wpdb->last_error: " . $wpdb->last_error);
-        error_log("=== END DEBUG getTotalSalesColumn ===");
 
         $total = floatval($total);
 
@@ -355,20 +302,15 @@ class VendorAdminColumns
     {
         global $wpdb;
 
-        // Get statuses for query (includes Master Orders)
+        // Get statuses for query (only individual orders)
         $query_statuses = $this->getOrderStatusesForQuery();
-        $master_statuses = $this->getMasterOrderStatuses($query_statuses);
-        $duplication_condition = $this->getDuplicationPreventionCondition($query_statuses);
+        $duplication_condition = $this->getDuplicationPreventionCondition();
 
-        // JOIN to avoid duplications with Master Orders
-        $master_order_join = "";
-        if (!empty($master_statuses)) {
-            $master_order_join = "
+        // JOIN to exclude orders that belong to Master Orders
+        $master_order_join = "
             LEFT JOIN {$wpdb->prefix}wc_orders_meta parent_meta ON o.id = parent_meta.order_id 
                 AND parent_meta.meta_key = 'master_order_id'
-            LEFT JOIN {$wpdb->prefix}wc_orders parent_order ON parent_meta.meta_value = parent_order.id
-                AND parent_order.status IN ('" . implode("','", $master_statuses) . "')";
-        }
+            LEFT JOIN {$wpdb->prefix}wc_orders parent_order ON parent_meta.meta_value = parent_order.id";
 
         // Count vendor orders with anti-duplication logic
         $count = $wpdb->get_var($wpdb->prepare("
@@ -410,20 +352,15 @@ class VendorAdminColumns
     {
         global $wpdb;
 
-        // Get statuses for query (includes Master Orders)
+        // Get statuses for query (only individual orders)
         $query_statuses = $this->getOrderStatusesForQuery();
-        $master_statuses = $this->getMasterOrderStatuses($query_statuses);
-        $duplication_condition = $this->getDuplicationPreventionCondition($query_statuses);
+        $duplication_condition = $this->getDuplicationPreventionCondition();
 
-        // JOIN to avoid duplications with Master Orders
-        $master_order_join = "";
-        if (!empty($master_statuses)) {
-            $master_order_join = "
+        // JOIN to exclude orders that belong to Master Orders
+        $master_order_join = "
             LEFT JOIN {$wpdb->prefix}wc_orders_meta parent_meta ON o.id = parent_meta.order_id 
                 AND parent_meta.meta_key = 'master_order_id'
-            LEFT JOIN {$wpdb->prefix}wc_orders parent_order ON parent_meta.meta_value = parent_order.id
-                AND parent_order.status IN ('" . implode("','", $master_statuses) . "')";
-        }
+            LEFT JOIN {$wpdb->prefix}wc_orders parent_order ON parent_meta.meta_value = parent_order.id";
 
         // Search last order with anti-duplication logic
         $last_order = $wpdb->get_row($wpdb->prepare("
@@ -601,20 +538,15 @@ class VendorAdminColumns
     {
         global $wpdb;
 
-        // Get statuses for query (includes Master Orders)
+        // Get statuses for query (only individual orders)
         $query_statuses = $this->getOrderStatusesForQuery();
-        $master_statuses = $this->getMasterOrderStatuses($query_statuses);
-        $duplication_condition = $this->getDuplicationPreventionCondition($query_statuses);
+        $duplication_condition = $this->getDuplicationPreventionCondition();
 
-        // JOIN to avoid duplications with Master Orders
-        $master_order_join = "";
-        if (!empty($master_statuses)) {
-            $master_order_join = "
+        // JOIN to exclude orders that belong to Master Orders
+        $master_order_join = "
             LEFT JOIN {$wpdb->prefix}wc_orders_meta parent_meta ON o.id = parent_meta.order_id 
                 AND parent_meta.meta_key = 'master_order_id'
-            LEFT JOIN {$wpdb->prefix}wc_orders parent_order ON parent_meta.meta_value = parent_order.id
-                AND parent_order.status IN ('" . implode("','", $master_statuses) . "')";
-        }
+            LEFT JOIN {$wpdb->prefix}wc_orders parent_order ON parent_meta.meta_value = parent_order.id";
 
         // Unified query to get vendor statistics with anti-duplication
         $stats = $wpdb->get_row($wpdb->prepare("

@@ -20,6 +20,9 @@ class VendorPDFManager
 {
     public function __construct()
     {
+        // ⚠️ ESTRATEGIA DE PROTECCIÓN: NO machacar números de facturas simplificadas existentes
+        // ✅ Solo aplicar numeración personalizada para credit-notes o cuando no hay número previo
+        
         // 🎯 HOOKS PRINCIPALES DE NUMERACIÓN - Prioridad alta para interceptar TODO
         add_filter('wpo_wcpdf_formatted_document_number', [$this, 'applyVendorNumbering'], 5, 4);
         add_filter('wpo_wcpdf_document_number', [$this, 'applyVendorNumbering'], 5, 3);
@@ -35,12 +38,8 @@ class VendorPDFManager
         // 🎯 HOOKS PARA SETTINGS - Limpiar configuración por defecto
         add_filter('wpo_wcpdf_document_number_settings', [$this, 'customizeNumberSettings'], 5, 3);
         
-        // Hooks específicos para el número de orden mostrado en PDFs
-        add_filter('wpo_wcpdf_order_number', [$this, 'modifyOrderNumber'], 10, 2);
-        add_filter('wpo_wcpdf_document_title', [$this, 'modifyDocumentTitle'], 10, 2);
-        
-        // Hook alternativo para algunos templates
-        add_filter('woocommerce_order_number', [$this, 'modifyWooOrderNumber'], 10, 2);
+        // ⚠️ HOOKS REMOVIDOS: No necesitamos interceptar order numbers ni títulos
+        // Los dejamos sin modificar para que mantengan sus valores originales
         
         // Hooks para personalizar datos del vendor en PDFs - Prioridad más alta
         add_filter('wpo_wcpdf_shop_name', [$this, 'modifyPDFShopName'], 5, 2);
@@ -54,9 +53,32 @@ class VendorPDFManager
         add_action('wpo_wcpdf_save_document', [$this, 'ensureAEATCompatibility'], 1, 2);
         add_action('wpo_wcpdf_after_pdf_created', [$this, 'ensureAEATCompatibility'], 1, 2);
         
-        // 🎯 INTERCEPTAR CONFIGURACIÓN GLOBAL DEL PLUGIN PARA CAMBIAR VAT DINÁMICAMENTE
-        add_filter('option_wpo_wcpdf_settings_general', [$this, 'modifyVATInGlobalSettings'], 10);
-        add_filter('wpo_wcpdf_shop_vat_number', [$this, 'modifyPDFVatNumber'], 1, 2);
+        // 🎯 INYECTAR VENDOR DATA EN SETTINGS GENERAL (coc_number Y vat_number)
+        add_filter('option_wpo_wcpdf_settings_general', [$this, 'injectVendorDataInSettings'], 10);
+        
+        // 🎯 HOOK MÁS ESPECÍFICO: Interceptar settings del documento antes de que se use
+        add_filter('wpo_wcpdf_document_store_settings', [$this, 'shouldStoreSettings'], 10, 2);
+        
+        // 🎯 HOOKS MÚLTIPLES para interceptar el Tax ID en diferentes momentos
+        add_filter('wpo_wcpdf_shop_coc_number', [$this, 'filterShopCocNumber'], 5, 2);
+        add_filter('wpo_wcpdf_formatted_shop_coc_number', [$this, 'filterShopCocNumber'], 5, 2);
+        
+        // 🎯 HOOKS PARA VAT NUMBER también (por si usa ese campo)
+        add_filter('wpo_wcpdf_shop_vat_number', [$this, 'filterShopVatNumber'], 5, 2);
+        add_filter('wpo_wcpdf_formatted_shop_vat_number', [$this, 'filterShopVatNumber'], 5, 2);
+        
+        // 🎯 HOOKS ESPECÍFICOS PARA SETTINGS TEXT (el que realmente controla el valor)
+        add_filter('wpo_wcpdf_coc_number_settings_text', [$this, 'filterCocNumberSettingsText'], 5, 2);
+        add_filter('wpo_wcpdf_vat_number_settings_text', [$this, 'filterVatNumberSettingsText'], 5, 2);
+        
+        // 🎯 HOOK MÁS TEMPRANO: Antes de que el documento se inicialice
+        add_action('wpo_wcpdf_init_document', [$this, 'injectTaxIdEarly'], 1, 1);
+        
+        // 🎯 ESTABLECER VENDOR TAX ID ANTES DE PROCESAR DOCUMENTO
+        add_action('wpo_wcpdf_before_document', [$this, 'setCurrentVendorTaxId'], 5, 2);
+        
+        // 🎯 HOOK ADICIONAL: Capturar contexto después de crear documento
+        add_action('wpo_wcpdf_created_document', [$this, 'cacheDocumentContext'], 1, 1);
 
     }
 
@@ -66,7 +88,10 @@ class VendorPDFManager
      */
     public function applyVendorNumbering($formatted_number, $document, $document_type = null, $order = null)
     {
+        error_log("🔥 VendorPDFManager applyVendorNumbering INICIADO - formatted_number: " . var_export($formatted_number, true));
+        
         if (!is_object($document)) {
+            error_log("❌ VendorPDFManager: Saliendo - document no es objeto");
             return $formatted_number;
         }
 
@@ -75,9 +100,12 @@ class VendorPDFManager
             $document_type = $document->get_type();
         }
         
+        error_log("🔥 VendorPDFManager: document_type detectado: " . var_export($document_type, true));
+        
         // Tipos de documento soportados
         $supported_types = ['invoice', 'simplified-invoice', 'credit-note', 'simplified-credit-note'];
         if (!in_array($document_type, $supported_types)) {
+            error_log("❌ VendorPDFManager: Saliendo - document_type '{$document_type}' no soportado");
             return $formatted_number;
         }
 
@@ -87,14 +115,44 @@ class VendorPDFManager
             $order_id = is_numeric($order) ? $order : (is_object($order) && method_exists($order, 'get_id') ? $order->get_id() : null);
         }
         
+        error_log("🔥 VendorPDFManager: order_id detectado: " . var_export($order_id, true));
+        
         if (!$order_id) {
+            error_log("❌ VendorPDFManager: Saliendo - no se pudo obtener order_id");
             return $formatted_number;
         }
         
-        // Obtener vendor ID
+        // Obtener vendor ID SIEMPRE (independiente de la numeración)
         $vendor_id = $this->getVendorId($order_id);
+        error_log("🔥 VendorPDFManager: vendor_id detectado: " . var_export($vendor_id, true));
+        
         if (!$vendor_id) {
+            error_log("❌ VendorPDFManager: Saliendo - no se pudo obtener vendor_id para order {$order_id}");
             return $formatted_number;
+        }
+        
+        error_log("✅ VendorPDFManager: Todos los checks pasaron - Llegando a shouldApplyCustomNumbering para order {$order_id}, document_type {$document_type}, vendor {$vendor_id}");
+            // Verificar si debemos aplicar numeración personalizada
+        if (!$this->shouldApplyCustomNumbering($document_type, $order_id)) {
+            // NO aplicar numeración personalizada, pero SÍ procesar Tax ID
+            // (Este es el caso de las facturas normales que ya tienen número)
+            
+            error_log("VendorPDFManager: No aplicando numeración personalizada - Documento: {$document_type}, Order: {$order_id}");
+            
+            // 🔧 FIX: Obtener el número correcto del meta en lugar de confiar en $formatted_number
+            $normalized_document_type = str_replace('-', '_', $document_type);
+            $existing_meta = get_post_meta($order_id, "_wcpdf_{$normalized_document_type}_number", true);
+            
+            error_log("VendorPDFManager: Meta existente para '_wcpdf_{$normalized_document_type}_number': " . var_export($existing_meta, true));
+            error_log("VendorPDFManager: Número formateado recibido: " . var_export($formatted_number, true));
+            
+            if (!empty($existing_meta)) {
+            error_log("VendorPDFManager: Devolviendo número existente del meta: {$existing_meta}");
+            return $existing_meta; // Devolver el número guardado (ej: "00001-2025")
+            }
+            
+            error_log("VendorPDFManager: No hay meta existente, devolviendo número formateado original: {$formatted_number}");
+            return $formatted_number; // Fallback al número original si no hay meta
         }
 
         // Obtener datos de numeración del vendor
@@ -112,12 +170,15 @@ class VendorPDFManager
         $vendor_number = $this->getNextNumber($vendor_id, $order_id, $document_type);
 
         // Formatear: PREFIX + NUMERO + SUFFIX
-        $number_str = str_pad($vendor_number, 4, '0', STR_PAD_LEFT);
+        $number_str = str_pad($vendor_number, 5, '0', STR_PAD_LEFT);
         $custom_number = $vendor_prefix . $number_str . $vendor_suffix;
         
-        // CRÍTICO: Guardar también en el metadato que AEAT lee
-        $aeat_key = "_wcpdf_{$document_type}_number";
-        update_post_meta($order_id, $aeat_key, $custom_number);
+        // PROTECCIÓN: NO machacar números de facturas simplificadas para AEAT
+        // Solo guardar en meta para credit notes, NO para invoices/simplified-invoices
+        if (strpos($document_type, 'credit-note') !== false) {
+            $aeat_key = "_wcpdf_{$document_type}_number";
+            update_post_meta($order_id, $aeat_key, $custom_number);
+        }
         
         return $custom_number;
     }
@@ -157,154 +218,11 @@ class VendorPDFManager
         return $custom_number ?: $number;
     }
 
-    /**
-     * Reemplazar el Order Number en PDFs con el número personalizado del vendor
-     */
-    public function replaceOrderNumberInPDF($order_number, $document)
-    {
-        if (!is_object($document)) {
-            return $order_number;
-        }
 
-        $document_type = $document->get_type();
-        
-        // Solo para credit notes - usar el número personalizado como "Order Number"
-        if (!in_array($document_type, ['credit-note', 'simplified-credit-note'])) {
-            return $order_number;
-        }
 
-        // Obtener el número personalizado del vendor
-        $custom_number = $this->getCustomNumberForDocument($document, $document_type);
-        
-        // Si tenemos número personalizado, usarlo como Order Number
-        return $custom_number ?: $order_number;
-    }
 
-    /**
-     * Modificar el número de orden mostrado en el PDF
-     * Para credit notes, mostrar el número personalizado del vendor en lugar del order number
-     */
-    public function modifyOrderNumber($order_number, $document)
-    {
-        if (!is_object($document)) {
-            return $order_number;
-        }
 
-        $document_type = $document->get_type();
-        
-        // Solo aplicar para notas de crédito
-        if (!in_array($document_type, ['credit-note', 'simplified-credit-note'])) {
-            return $order_number;
-        }
 
-        // Obtener order_id
-        $order_id = $this->getOrderIdFromDocument($document);
-        if (!$order_id) {
-            return $order_number;
-        }
-        
-        // Obtener vendor ID
-        $vendor_id = $this->getVendorId($order_id);
-        if (!$vendor_id) {
-            return $order_number;
-        }
-
-        // Obtener datos de numeración del vendor
-        $prefix_field = $this->getPrefixField($document_type);
-        $suffix_field = $this->getSuffixField($document_type);
-        
-        $vendor_prefix = get_field($prefix_field, $vendor_id) ?: '';
-        $vendor_suffix = get_field($suffix_field, $vendor_id) ?: '';
-        
-        if (empty($vendor_prefix)) {
-            return $order_number;
-        }
-
-        // Obtener número personalizado del vendor
-        $vendor_number = $this->getNextNumber($vendor_id, $order_id, $document_type);
-
-        // Formatear: PREFIX + NUMERO + SUFFIX
-        $number_str = str_pad($vendor_number, 4, '0', STR_PAD_LEFT);
-        $custom_number = $vendor_prefix . $number_str . $vendor_suffix;
-        
-        return $custom_number;
-    }
-
-    /**
-     * Modificar el título del documento para incluir el número personalizado
-     */
-    public function modifyDocumentTitle($title, $document)
-    {
-        if (!is_object($document)) {
-            return $title;
-        }
-
-        $document_type = $document->get_type();
-        
-        // Solo aplicar para notas de crédito
-        if (!in_array($document_type, ['credit-note', 'simplified-credit-note'])) {
-            return $title;
-        }
-
-        // Obtener el número personalizado
-        $custom_number = $this->getCustomNumberForDocument($document, $document_type);
-        
-        if ($custom_number) {
-            // Reemplazar el título con el número personalizado
-            $document_name = ($document_type === 'simplified-credit-note') ? 'Simplified Credit Note' : 'Credit Note';
-            return $document_name . ' ' . $custom_number;
-        }
-
-        return $title;
-    }
-
-    /**
-     * Hook alternativo para el número de WooCommerce
-     */
-    public function modifyWooOrderNumber($order_number, $order)
-    {
-        // Solo actuar si estamos generando un PDF
-        if (!$this->isGeneratingPDF()) {
-            return $order_number;
-        }
-
-        if (!is_object($order)) {
-            return $order_number;
-        }
-
-        // Verificar si es un refund (nota de crédito)
-        if ($order instanceof \WC_Order_Refund) {
-            $order_id = $order->get_id();
-            $vendor_id = $this->getVendorId($order_id);
-            
-            if ($vendor_id) {
-                $custom_number = $this->getCustomNumberForOrder($vendor_id, $order_id, 'credit-note');
-                if ($custom_number) {
-                    return $custom_number;
-                }
-            }
-        }
-
-        return $order_number;
-    }
-
-    /**
-     * Verificar si estamos generando un PDF
-     */
-    private function isGeneratingPDF()
-    {
-        // Verificar si es una llamada AJAX para generar PDF
-        if (wp_doing_ajax() && isset($_GET['action']) && $_GET['action'] === 'generate_wpo_wcpdf') {
-            return true;
-        }
-        
-        // Verificar otros contextos de generación de PDF
-        if (isset($_GET['wpo_wcpdf_action'])) {
-            return true;
-        }
-
-        return false;
-    }
 
     /**
      * Obtener número personalizado para un documento específico
@@ -345,59 +263,7 @@ class VendorPDFManager
         return $vendor_prefix . $number_str . $vendor_suffix;
     }
 
-    /**
-     * Modificar las variables del template del PDF
-     */
-    public function modifyTemplateVars($template_vars, $document_type, $document)
-    {
-        // Solo aplicar para notas de crédito
-        if (!in_array($document_type, ['credit-note', 'simplified-credit-note'])) {
-            return $template_vars;
-        }
 
-        if (!is_object($document)) {
-            return $template_vars;
-        }
-
-        // Obtener el número personalizado
-        $custom_number = $this->getCustomNumberForDocument($document, $document_type);
-        
-        if ($custom_number) {
-            // Modificar el número de orden en las variables del template
-            if (isset($template_vars['order'])) {
-                // Si el orden está disponible como objeto
-                if (is_object($template_vars['order']) && method_exists($template_vars['order'], 'get_order_number')) {
-                    // Crear un wrapper para sobrescribir el método get_order_number
-                    $template_vars['order'] = new class($template_vars['order'], $custom_number) {
-                        private $original_order;
-                        private $custom_number;
-
-                        public function __construct($original_order, $custom_number) {
-                            $this->original_order = $original_order;
-                            $this->custom_number = $custom_number;
-                        }
-
-                        public function get_order_number() {
-                            return $this->custom_number;
-                        }
-
-                        public function __call($method, $args) {
-                            return call_user_func_array([$this->original_order, $method], $args);
-                        }
-
-                        public function __get($property) {
-                            return $this->original_order->$property;
-                        }
-                    };
-                }
-            }
-
-            // También agregar el número personalizado como variable separada
-            $template_vars['vendor_order_number'] = $custom_number;
-        }
-
-        return $template_vars;
-    }
 
     /**
      * Modificar nombre de la tienda en PDFs
@@ -443,8 +309,6 @@ class VendorPDFManager
         return $shop_address;
     }
 
-
-
     /**
      * Hook alternativo para dirección formateada - Con formato HTML
      * Usa el mismo patrón que wpo_wcpdf_format_address()
@@ -478,51 +342,233 @@ class VendorPDFManager
     }
 
     /**
-     * Modificar configuración global del plugin para cambiar VAT dinámicamente
-     * Funciona igual que modifyPDFShopName y modifyPDFShopAddress
+     * Inyectar datos del vendor en settings general - MÉTODO UNIFICADO Y AGRESIVO
      */
-    public function modifyVATInGlobalSettings($settings)
+    public function injectVendorDataInSettings($settings)
     {
-        // Solo actuar si estamos generando un PDF
-        if (!$this->isGeneratingPDF() && !wp_doing_ajax()) {
-            return $settings;
-        }
-
-        // Intentar detectar el contexto actual del vendor
-        $vendor_vat = $this->getCurrentVendorVAT();
+        $vendor_nif = $this->getCurrentVendorNifSimple();
         
-        if ($vendor_vat) {
-            // IMPORTANTE: Cambiar dinámicamente el VAT global por el del vendor
-            // Esto es lo mismo que hacemos con shop_name y shop_address
-            $settings['vat_number'] = $vendor_vat;
-        } else {
-            // Si no hay vendor específico, limpiar el VAT para no mostrar nada
-            $settings['vat_number'] = '';
+        if ($vendor_nif) {
+            // Inyectar en MÚLTIPLES campos posibles
+            $settings['coc_number'] = $vendor_nif;
+            $settings['vat_number'] = $vendor_nif;
+            $settings['shop_coc_number'] = $vendor_nif;
+            $settings['company_coc_number'] = $vendor_nif;
+            $settings['tax_id'] = $vendor_nif;
+            $settings['nif'] = $vendor_nif;
         }
         
         return $settings;
     }
 
     /**
-     * Modificar número de VAT en PDFs
+     * Interceptar si el documento debe almacenar settings - FORZAR REGENERACIÓN
      */
-    public function modifyPDFVatNumber($vat_number, $document)
+    public function shouldStoreSettings($store_settings, $document)
     {
-        $vendor_data = $this->getVendorDataFromDocument($document);
+        if (!is_object($document)) {
+            return $store_settings;
+        }
+
+        $document_type = method_exists($document, 'get_type') ? $document->get_type() : 'unknown';
         
-        if ($vendor_data && !empty($vendor_data['tax_id'])) {
-            return $vendor_data['tax_id'];
+        // Para facturas y facturas simplificadas, SIEMPRE usar settings frescos
+        if (in_array($document_type, ['invoice', 'simplified-invoice'])) {
+            return false; // No almacenar settings históricos, usar siempre actuales
         }
         
-        // Si no hay vendor data, devolver vacío para ocultar
+        return $store_settings;
+    }
+
+    /**
+     * Filtro DIRECTO para el COC number - MÉTODO ESPECÍFICO
+     */
+    public function filterShopCocNumber($coc_number, $document)
+    {
+        if (!is_object($document)) {
+            return $coc_number;
+        }
+
+        $order_id = $this->getOrderIdFromDocument($document);
+        if ($order_id) {
+            $vendor_id = $this->getVendorId($order_id);
+            if ($vendor_id) {
+                $tax_id = get_field('_taxIdentificationNumber', $vendor_id) ?: '';
+                $cleaned_tax_id = trim(str_replace(':', '', $tax_id));
+                
+                if ($cleaned_tax_id) {
+                    return $cleaned_tax_id;
+                }
+            }
+        }
+        return $coc_number;
+    }
+
+    /**
+     * Filtro para VAT number (por si el plugin usa este campo en lugar de coc_number)
+     */
+    public function filterShopVatNumber($vat_number, $document)
+    {
+        if (!is_object($document)) {
+            return $vat_number;
+        }
+
+        $order_id = $this->getOrderIdFromDocument($document);
+        if ($order_id) {
+            $vendor_id = $this->getVendorId($order_id);
+            if ($vendor_id) {
+                $tax_id = get_field('_taxIdentificationNumber', $vendor_id) ?: '';
+                $cleaned_tax_id = trim(str_replace(':', '', $tax_id));
+                
+                if ($cleaned_tax_id) {
+                    return $cleaned_tax_id;
+                }
+            }
+        }
+        return $vat_number;
+    }
+
+    /**
+     * Inyectar Tax ID muy temprano en el proceso del documento
+     */
+    public function injectTaxIdEarly($document)
+    {
+        if (!is_object($document)) {
+            return;
+        }
+
+        $order_id = $this->getOrderIdFromDocument($document);
+        if ($order_id) {
+            $vendor_id = $this->getVendorId($order_id);
+            if ($vendor_id) {
+                $tax_id = get_field('_taxIdentificationNumber', $vendor_id) ?: '';
+                $cleaned_tax_id = trim(str_replace(':', '', $tax_id));
+                
+                if ($cleaned_tax_id) {
+                    // Inyectar en múltiples formas
+                    $GLOBALS['vendor_tax_id'] = $cleaned_tax_id;
+                    
+                    // Cache el order_id para uso posterior
+                    wp_cache_set('wpo_wcpdf_current_order_id', $order_id, 'wpo_wcpdf', 300);
+                    
+                    // Hook temporal para modificar settings
+                    add_filter('option_wpo_wcpdf_settings_general', function($settings) use ($cleaned_tax_id) {
+                        $settings['coc_number'] = $cleaned_tax_id;
+                        $settings['vat_number'] = $cleaned_tax_id;
+                        $settings['shop_coc_number'] = $cleaned_tax_id;
+                        $settings['company_coc_number'] = $cleaned_tax_id;
+                        $settings['tax_id'] = $cleaned_tax_id;
+                        $settings['nif'] = $cleaned_tax_id;
+                        return $settings;
+                    }, 1);
+                }
+            }
+        }
+    }
+
+    /**
+     * Establecer Tax ID del vendor en variable global antes de procesar documento
+     */
+    public function setCurrentVendorTaxId($document_type, $document)
+    {
+        if (!is_object($document)) {
+            return;
+        }
+
+        $order_id = $this->getOrderIdFromDocument($document);
+        if ($order_id) {
+            $vendor_data = $this->getVendorData($order_id);
+            if (!empty($vendor_data['tax_id'])) {
+                $GLOBALS['current_vendor_tax_id'] = $vendor_data['tax_id'];
+            }
+        }
+    }
+
+    /**
+     * Obtener NIF del vendor actual - MÉTODO MEJORADO CON MÚLTIPLES FUENTES
+     */
+    private function getCurrentVendorNifSimple()
+    {
+        // Método 1: Desde parámetros GET (generación manual de PDFs)
+        if (isset($_GET['order_ids'])) {
+            $order_ids = explode(',', $_GET['order_ids']);
+            $order_id = intval($order_ids[0]);
+            
+            if ($order_id) {
+                $vendor_id = $this->getVendorId($order_id);
+                if ($vendor_id) {
+                    $tax_id = get_field('_taxIdentificationNumber', $vendor_id) ?: '';
+                    $cleaned = trim(str_replace(':', '', $tax_id));
+                    return $cleaned;
+                }
+            }
+        }
+
+        // Método 2: Desde parámetros POST (AJAX)
+        if (isset($_POST['order_ids'])) {
+            $order_ids = is_array($_POST['order_ids']) ? $_POST['order_ids'] : explode(',', $_POST['order_ids']);
+            $order_id = intval($order_ids[0]);
+            
+            if ($order_id) {
+                $vendor_id = $this->getVendorId($order_id);
+                if ($vendor_id) {
+                    $tax_id = get_field('_taxIdentificationNumber', $vendor_id) ?: '';
+                    $cleaned = trim(str_replace(':', '', $tax_id));
+                    return $cleaned;
+                }
+            }
+        }
+        
+        // Método 3: NUEVO - Desde cache establecido por injectTaxIdEarly
+        $cached_order_id = wp_cache_get('wpo_wcpdf_current_order_id', 'wpo_wcpdf');
+        if ($cached_order_id) {
+            $vendor_id = $this->getVendorId($cached_order_id);
+            if ($vendor_id) {
+                $tax_id = get_field('_taxIdentificationNumber', $vendor_id) ?: '';
+                $cleaned = trim(str_replace(':', '', $tax_id));
+                return $cleaned;
+            }
+        }
+
+        // Método 4: NUEVO - Desde variable global si fue establecida por otros hooks
+        if (isset($GLOBALS['vendor_tax_id'])) {
+            return $GLOBALS['vendor_tax_id'];
+        }
+        
+        // Método 5: NUEVO - Intentar detectar desde el contexto actual del documento WooCommerce PDF
+        global $wpo_wcpdf;
+        if (isset($wpo_wcpdf->current_document) && is_object($wpo_wcpdf->current_document)) {
+            $order_id = $this->getOrderIdFromDocument($wpo_wcpdf->current_document);
+            if ($order_id) {
+                $vendor_id = $this->getVendorId($order_id);
+                if ($vendor_id) {
+                    $tax_id = get_field('_taxIdentificationNumber', $vendor_id) ?: '';
+                    $cleaned = trim(str_replace(':', '', $tax_id));
+                    return $cleaned;
+                }
+            }
+        }
+        
+        // Método 6: NUEVO - Buscar en el último order procesado (último recurso)
+        if (defined('WC_PDF_IPS_VERSION')) {
+            // Intentar obtener de la sesión o cache temporal
+            $temp_order_id = wp_cache_get('wpo_wcpdf_current_order_id', 'wpo_wcpdf');
+            if ($temp_order_id) {
+                $vendor_id = $this->getVendorId($temp_order_id);
+                if ($vendor_id) {
+                    $tax_id = get_field('_taxIdentificationNumber', $vendor_id) ?: '';
+                    $cleaned = trim(str_replace(':', '', $tax_id));
+                    return $cleaned;
+                }
+            }
+        }
         return '';
     }
 
     /**
-     * Obtener VAT del vendor actual basado en el contexto
-     * Usa la misma lógica que modifyPDFShopName y modifyPDFShopAddress
+     * Obtener NIF del vendor actual para inyectar en coc_number - MÉTODO ORIGINAL COMO BACKUP
      */
-    private function getCurrentVendorVAT()
+    private function getCurrentVendorNif()
     {
         // Método 1: Desde parámetros de la petición (generación manual)
         if (isset($_GET['order_ids']) && isset($_GET['document_type'])) {
@@ -534,17 +580,32 @@ class VendorPDFManager
                 return $vendor_data['tax_id'] ?? '';
             }
         }
+
+        // Método 2: Desde POST (AJAX requests)
+        if (isset($_POST['order_ids'])) {
+            $order_ids = is_array($_POST['order_ids']) ? $_POST['order_ids'] : explode(',', $_POST['order_ids']);
+            $order_id = intval($order_ids[0]);
+            
+            if ($order_id) {
+                $vendor_data = $this->getVendorData($order_id);
+                return $vendor_data['tax_id'] ?? '';
+            }
+        }
         
-        // Método 2: Desde contexto de documento actual (si existe)
-        // Este método funciona cuando ya hay un documento siendo procesado
+        // Método 3: Desde contexto de documento actual (si existe)
         global $wpo_wcpdf;
         if (isset($wpo_wcpdf->current_document) && is_object($wpo_wcpdf->current_document)) {
             $document = $wpo_wcpdf->current_document;
             $vendor_data = $this->getVendorDataFromDocument($document);
             return $vendor_data['tax_id'] ?? '';
         }
+
+        // Método 4: Desde variable global si está disponible
+        if (isset($GLOBALS['current_vendor_tax_id'])) {
+            return $GLOBALS['current_vendor_tax_id'];
+        }
         
-        // Si no podemos detectar el vendor, devolver vacío para ocultar VAT
+        // Si no podemos detectar el vendor, devolver vacío
         return '';
     }
 
@@ -584,17 +645,20 @@ class VendorPDFManager
             return; // Ya existe, no hacer nada
         }
 
-        // Obtener el número personalizado del vendor y guardarlo en formato AEAT
-        $custom_number = $this->getCustomNumberForOrder($vendor_id, $order_id, $document_type);
-        
-        if ($custom_number) {
-            // GUARDAR EN AMBOS FORMATOS para compatibilidad completa
-            // 1. Formato con guión (original)
-            update_post_meta($order_id, $aeat_key, $custom_number);
+        // PROTECCIÓN: Solo guardar números personalizados para credit notes, NO para facturas
+        if (strpos($document_type, 'credit-note') !== false) {
+            // Obtener el número personalizado del vendor y guardarlo en formato AEAT
+            $custom_number = $this->getCustomNumberForOrder($vendor_id, $order_id, $document_type);
             
-            // 2. Formato con guión bajo (que usa AEATApiBridge)
-            $aeat_key_underscore = "_wcpdf_" . str_replace('-', '_', $document_type) . "_number";
-            update_post_meta($order_id, $aeat_key_underscore, $custom_number);
+            if ($custom_number) {
+                // GUARDAR EN AMBOS FORMATOS para compatibilidad completa (solo credit notes)
+                // 1. Formato con guión (original)
+                update_post_meta($order_id, $aeat_key, $custom_number);
+                
+                // 2. Formato con guión bajo (que usa AEATApiBridge)
+                $aeat_key_underscore = "_wcpdf_" . str_replace('-', '_', $document_type) . "_number";
+                update_post_meta($order_id, $aeat_key_underscore, $custom_number);
+            }
         }
     }
 
@@ -602,6 +666,7 @@ class VendorPDFManager
 
     /**
      * Obtener vendor_id desde un order_id
+     * Ahora simplificado: las master orders que paga el centro ya tienen vendor_id asignado directamente
      */
     private function getVendorId($order_id)
     {
@@ -610,6 +675,14 @@ class VendorPDFManager
             return null;
         }
 
+        // Primero, verificar si la orden ya tiene vendor_id directamente asignado
+        // (esto aplica para master orders que paga el centro y órdenes normales)
+        $vendor_id = $order->get_meta('_vendor_id');
+        if ($vendor_id) {
+            return (int) $vendor_id;
+        }
+
+        // Fallback: buscar vendor a través del school_id (para órdenes más antiguas)
         $school_id = $this->getSchoolId($order);
         if (!$school_id) {
             return null;
@@ -747,9 +820,11 @@ class VendorPDFManager
             $number_str = str_pad($next_number, 4, '0', STR_PAD_LEFT);
             $formatted_number = $vendor_prefix . $number_str . $vendor_suffix;
             
-            // Guardar en formato AEAT: _wcpdf_{document_type}_number
-            $aeat_key = "_wcpdf_{$document_type}_number";
-            update_post_meta($order_id, $aeat_key, $formatted_number);
+            // PROTECCIÓN: Solo guardar en metadatos AEAT para credit notes, NO para facturas
+            if (strpos($document_type, 'credit-note') !== false) {
+                $aeat_key = "_wcpdf_{$document_type}_number";
+                update_post_meta($order_id, $aeat_key, $formatted_number);
+            }
         }
         
         return $next_number;
@@ -880,5 +955,293 @@ class VendorPDFManager
         
         // Reutilizar la lógica principal
         return $this->applyVendorNumbering($document_number, $document, $document_type);
+    }
+
+    /**
+     * Verificar si debemos aplicar numeración personalizada para un tipo de documento
+     * 
+     * @param string $document_type Tipo de documento
+     * @param int $order_id ID del pedido
+     * @return bool True si podemos aplicar numeración personalizada
+     */
+    private function shouldApplyCustomNumbering($document_type, $order_id)
+    {
+        error_log("🎯 VendorPDFManager shouldApplyCustomNumbering EJECUTÁNDOSE - document_type: '{$document_type}', order_id: {$order_id}");
+        
+        // SIEMPRE aplicar para credit notes (notas de crédito)
+        if (strpos($document_type, 'credit-note') !== false) {
+            error_log("✅ shouldApplyCustomNumbering: Es credit-note, devolviendo TRUE");
+            return true;
+        }
+        
+        // Para facturas (invoices), verificar si ya tienen número asignado
+        if (strpos($document_type, 'invoice') !== false) {
+            // 🔧 FIX: Convertir guiones a guiones bajos en el meta key
+            $normalized_document_type = str_replace('-', '_', $document_type);
+            $existing_meta = get_post_meta($order_id, "_wcpdf_{$normalized_document_type}_number", true);
+            
+            error_log("🔍 shouldApplyCustomNumbering: Document type '{$document_type}' normalizado a '{$normalized_document_type}', meta encontrado: " . var_export($existing_meta, true));
+            
+            $result = empty($existing_meta);
+            error_log("📋 shouldApplyCustomNumbering: empty(\$existing_meta) = " . ($result ? 'TRUE' : 'FALSE') . " - " . ($result ? 'SÍ aplicar numeración' : 'NO aplicar numeración'));
+            
+            // Solo aplicar si NO tiene número previo
+            return $result;
+        }
+        
+        error_log("❌ shouldApplyCustomNumbering: No es invoice ni credit-note, devolviendo FALSE");
+        return false;
+    }
+
+    // ========== MÉTODOS AVANZADOS COPIADOS DE VendorDataManager ==========
+
+    /**
+     * Resuelve el ID real del order/refund basado en el tipo de documento
+     * Para credit notes, intenta encontrar el refund específico si se pasa el pedido padre
+     * 
+     * COPIADO DE VendorDataManager para no perder funcionalidad avanzada
+     */
+    private function resolveActualOrderId($order_id, $document_type)
+    {
+        // Si no es una nota de crédito, usar el ID original
+        if (!in_array($document_type, ['credit-note', 'simplified-credit-note'])) {
+            return $order_id;
+        }
+
+        $order = wc_get_order($order_id);
+        if (!$order) {
+            return $order_id;
+        }
+
+        // Si ya es un refund, usar tal como está
+        if ($order instanceof \WC_Order_Refund) {
+            return $order_id;
+        }
+
+        // Si es un pedido padre, buscar refunds
+        $refunds = $order->get_refunds();
+        if (empty($refunds)) {
+            return $order_id;
+        }
+
+        // ESTRATEGIA: Usar el refund más reciente que no tenga PDF generado aún
+        $vendor_id = $this->getVendorId($order_id); // Usar pedido padre para obtener vendor
+        
+        if ($vendor_id) {
+            foreach ($refunds as $refund) {
+                $refund_id = $refund->get_id();
+                
+                // Verificar si este refund ya tiene un número asignado
+                $assigned_number_key = "_vendor_{$document_type}_assigned_number_{$vendor_id}";
+                $already_assigned = get_post_meta($refund_id, $assigned_number_key, true);
+                
+                if (!$already_assigned) {
+                    // Este refund no tiene número asignado, es el candidato
+                    return $refund_id;
+                }
+            }
+        }
+
+        // Si todos los refunds ya tienen número, usar el más reciente
+        $latest_refund = reset($refunds);
+        return $latest_refund->get_id();
+    }
+
+    /**
+     * Obtener el siguiente número de documento disponible - VERSIÓN AVANZADA
+     * Maneja correctamente múltiples refunds del mismo pedido con sistema de bloqueo
+     * 
+     * COPIADO DE VendorDataManager para no perder funcionalidad avanzada
+     */
+    private function getNextDocumentNumberAdvanced($vendor_id, $order_id, $document_type)
+    {
+        // Obtener el orden actual para determinar si es refund o pedido principal
+        $order = wc_get_order($order_id);
+        if (!$order) {
+            return 1;
+        }
+
+        $control_id = $order_id; // Para refunds, usar el ID del refund individual
+
+        // Verificar si ya tenemos un número asignado para este documento específico
+        $assigned_number_key = "_vendor_{$document_type}_assigned_number_{$vendor_id}";
+        $assigned_number = get_post_meta($control_id, $assigned_number_key, true);
+        
+        if ($assigned_number) {
+            return intval($assigned_number);
+        }
+        
+        // SISTEMA DE BLOQUEO para evitar condiciones de carrera
+        $lock_key = "_vendor_{$document_type}_lock_{$vendor_id}";
+        $lock_value = time();
+        $lock_timeout = 10; // 10 segundos máximo
+        
+        // Intentar obtener el bloqueo
+        $existing_lock = get_transient($lock_key);
+        if ($existing_lock && ($lock_value - $existing_lock) < $lock_timeout) {
+            // Esperar un poco y reintentar
+            usleep(100000); // 0.1 segundos
+            $existing_lock = get_transient($lock_key);
+            
+            if ($existing_lock && ($lock_value - $existing_lock) < $lock_timeout) {
+                // Si sigue bloqueado, usar fallback
+                $fallback_number = intval(get_field($this->getNumberField($document_type), $vendor_id) ?: 0) + 1;
+                update_post_meta($control_id, $assigned_number_key, $fallback_number);
+                return $fallback_number;
+            }
+        }
+        
+        // Establecer bloqueo
+        set_transient($lock_key, $lock_value, $lock_timeout);
+        
+        // Obtener campo de número según tipo de documento
+        $number_field = $this->getNumberField($document_type);
+        
+        // Obtener número actual y calcular el siguiente
+        $current_number = get_field($number_field, $vendor_id) ?: 0;
+        $next_number = intval($current_number) + 1;
+        
+        // Actualizar inmediatamente el campo ACF para reservar el número
+        $update_success = update_field($number_field, $next_number, $vendor_id);
+        
+        if ($update_success) {
+            // Reservar este número para este documento específico
+            update_post_meta($control_id, $assigned_number_key, $next_number);
+        }
+        
+        // Liberar bloqueo
+        delete_transient($lock_key);
+        
+        return $next_number;
+    }
+
+    /**
+     * Incrementar número de documento de forma segura (evita múltiples incrementos)
+     * 
+     * COPIADO DE VendorDataManager para no perder funcionalidad avanzada
+     */
+    private function incrementVendorDocumentNumberSafe($vendor_id, $order_id, $document_type)
+    {
+        // Obtener el orden actual para determinar si es refund o pedido principal
+        $order = wc_get_order($order_id);
+        if (!$order) {
+            return;
+        }
+
+        // Para refunds, usar el ID del refund individual para control único
+        // Para pedidos principales, usar el order_id normal
+        $control_id = $order_id;
+        if ($order instanceof \WC_Order_Refund) {
+            // Cada refund tiene su propio ID único, esto permite múltiples refunds del mismo pedido
+            $control_id = $order_id; // Ya es el ID del refund individual
+        }
+
+        // Verificar si ya se incrementó para este documento específico
+        $increment_meta_key = "_vendor_{$document_type}_incremented_{$vendor_id}";
+        $already_incremented = get_post_meta($control_id, $increment_meta_key, true);
+        
+        if ($already_incremented) {
+            return;
+        }
+        
+        // Verificar que tenemos el número asignado
+        $assigned_number_key = "_vendor_{$document_type}_assigned_number_{$vendor_id}";
+        $assigned_number = get_post_meta($control_id, $assigned_number_key, true);
+        
+        if ($assigned_number) {
+            // Marcar como completado (el ACF ya fue actualizado por getNextDocumentNumber)
+            update_post_meta($control_id, $increment_meta_key, true);
+        }
+    }
+
+    /**
+     * 🎯 Cachear contexto de documento para uso posterior
+     */
+    public function cacheDocumentContext($document)
+    {
+        if (!is_object($document)) {
+            return;
+        }
+
+        $order_id = $this->getOrderIdFromDocument($document);
+        if ($order_id) {
+            // Cachear el order_id del documento actual
+            wp_cache_set('wpo_wcpdf_current_order_id', $order_id, 'wpo_wcpdf', 600); // 10 minutos
+            
+            // También establecer en global para acceso inmediato
+            $GLOBALS['wpo_wcpdf_current_order_id'] = $order_id;
+        }
+    }
+
+    /**
+     * 🎯 HOOK ESPECÍFICO: Filtrar COC Number Settings Text (el método definitivo)
+     */
+    public function filterCocNumberSettingsText($text, $document)
+    {
+        $document_type = is_object($document) ? $document->get_type() : 'unknown';
+        
+        // USAR EL MISMO MÉTODO PARA TODAS LAS FACTURAS (normales y simplificadas)
+        if (is_object($document)) {
+            $order_id = $this->getOrderIdFromDocument($document);
+            if ($order_id) {
+                // Cachear para que getCurrentVendorNifSimple pueda usarlo
+                wp_cache_set('wpo_wcpdf_current_order_id', $order_id, 'wpo_wcpdf', 300);
+                $GLOBALS['wpo_wcpdf_current_order_id'] = $order_id;
+                
+                // Obtener Tax ID directamente del vendor
+                $vendor_id = $this->getVendorId($order_id);
+                if ($vendor_id) {
+                    $tax_id = get_field('_taxIdentificationNumber', $vendor_id) ?: '';
+                    $cleaned_tax_id = trim(str_replace(':', '', $tax_id));
+                    
+                    if ($cleaned_tax_id) {
+                        return $cleaned_tax_id;
+                    }
+                }
+            }
+        }
+        
+        // Fallback usando getCurrentVendorNifSimple
+        $vendor_tax_id = $this->getCurrentVendorNifSimple();
+        if (!empty($vendor_tax_id)) {
+            return $vendor_tax_id;
+        }
+        return $text;
+    }
+
+    /**
+     * 🎯 HOOK ESPECÍFICO: Filtrar VAT Number Settings Text 
+     */
+    public function filterVatNumberSettingsText($text, $document)
+    {
+        $document_type = is_object($document) ? $document->get_type() : 'unknown';
+        
+        // USAR EL MISMO MÉTODO PARA TODAS LAS FACTURAS (normales y simplificadas)
+        if (is_object($document)) {
+            $order_id = $this->getOrderIdFromDocument($document);
+            if ($order_id) {
+                // Cachear para que getCurrentVendorNifSimple pueda usarlo
+                wp_cache_set('wpo_wcpdf_current_order_id', $order_id, 'wpo_wcpdf', 300);
+                $GLOBALS['wpo_wcpdf_current_order_id'] = $order_id;
+                
+                // Obtener Tax ID directamente del vendor
+                $vendor_id = $this->getVendorId($order_id);
+                if ($vendor_id) {
+                    $tax_id = get_field('_taxIdentificationNumber', $vendor_id) ?: '';
+                    $cleaned_tax_id = trim(str_replace(':', '', $tax_id));
+                    
+                    if ($cleaned_tax_id) {
+                        return $cleaned_tax_id;
+                    }
+                }
+            }
+        }
+        
+        // Fallback usando getCurrentVendorNifSimple
+        $vendor_tax_id = $this->getCurrentVendorNifSimple();
+        if (!empty($vendor_tax_id)) {
+            return $vendor_tax_id;
+        }
+        return $text;
     }
 }

@@ -69,14 +69,8 @@ class SchoolUserSystemInitializer
 
             $this->initialized = true;
 
-            // Log de inicialización exitosa
-            if (defined('WP_DEBUG') && WP_DEBUG) {
-                error_log('School User System: Successfully initialized');
-            }
-
         } catch (\Exception $e) {
-            // Log del error
-            error_log('School User System Initialization Error: ' . $e->getMessage());
+            // Capturar errores de inicialización silenciosamente
             
             // Mostrar mensaje en admin si es posible
             if (is_admin()) {
@@ -113,13 +107,7 @@ class SchoolUserSystemInitializer
             $errors[] = 'El post type de escuelas no está registrado (school o coo_school)';
         }
 
-        // Verificar capacidades del usuario actual
-        if (is_admin() && !current_user_can('manage_options')) {
-            // No es un error crítico, solo una advertencia
-            if (defined('WP_DEBUG') && WP_DEBUG) {
-                error_log('School User System: Current user lacks manage_options capability');
-            }
-        }
+        // Verificar capacidades del usuario actual (silencioso)
 
         if (!empty($errors)) {
             throw new \Exception('Dependencias faltantes: ' . implode(', ', $errors));

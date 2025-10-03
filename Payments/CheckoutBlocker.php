@@ -88,7 +88,6 @@ class CheckoutBlocker
      * Constructor de la clase
      */
     public function __construct() {
-        // Verificar si está desactivado temporalmente para debugging
         // Hooks principales
         add_action('template_redirect', [$this, 'checkUnpaidOrders']);
         add_action('woocommerce_thankyou', [$this, 'clearCartAfterPayment']);
@@ -340,7 +339,7 @@ class CheckoutBlocker
     }
 
     /**
-     * NUEVO MÉTODO: Verificación avanzada si un pedido necesita pago
+     * Verificación avanzada si un pedido necesita pago
      * Utiliza lógica simplificada sin dependencias circulares
      * 
      * @param \WC_Order $order Objeto de pedido
@@ -380,7 +379,7 @@ class CheckoutBlocker
     }
 
     /**
-     * NUEVO MÉTODO: Verificación específica para transferencias bancarias
+     * Verificación específica para transferencias bancarias
      * Replica la lógica de BankTransferBulkActions para detectar transferencias sin pagar
      * 
      * @param \WC_Order $order Objeto de pedido de transferencia bancaria
