@@ -185,53 +185,79 @@ class RefundRestrictions
     }
 
     /**
-     * Verificar si una orden está realmente pagada usando el sistema personalizado
+     * Verificar si una orden está realmente pagada
+     * Replica la MISMA lógica de CheckoutBlocker para consistencia
      * 
      * @param \WC_Order $order Objeto de orden
      * @return bool Si la orden está pagada
      */
     private function isOrderReallyPaid(\WC_Order $order): bool
     {
-        // Usar la clase PaymentStatusColumn existente para verificar el estado de pago
-        // Esta es la misma lógica que usa la columna de estado de pago
+        // LÓGICA IDÉNTICA A CheckoutBlocker::orderNeedsPaymentAdvanced()
+        // Pero invertida (si NO necesita pago = está pagada)
         
-        // Meta personalizado que indica que la orden está pagada
-        $custom_paid_status = $order->get_meta('_order_marked_as_paid');
-        if ($custom_paid_status === 'yes' || $custom_paid_status === '1') {
-            return true;
+        // 1. Verificar el meta _order_marked_as_paid (marcado manualmente)
+        $marked_as_paid = $order->get_meta('_order_marked_as_paid');
+        if ($marked_as_paid === 'yes' || $marked_as_paid === '1' || $marked_as_paid === 1) {
+            return true; // Marcado como pagado manualmente
         }
         
-        // Verificar si tiene transacción completada
+        // 2. Verificar indicadores confiables de pago
+        $payment_date = $order->get_meta('payment_date');
+        $deferred_payment_date = $order->get_meta('_dm_pay_later_card_payment_date');
+        
+        // 3. Verificar transaction_id solo si no es auto-generado
         $transaction_id = $order->get_transaction_id();
-        if (!empty($transaction_id)) {
+        $reliable_transaction = !empty($transaction_id) && stripos($transaction_id, 'order') === false;
+        
+        // Si tiene indicadores confiables de pago, SÍ está pagado
+        if (!empty($payment_date) || !empty($deferred_payment_date) || $reliable_transaction) {
             return true;
         }
         
-        // Verificar estados de orden que indican pago
-        $paid_statuses = ['completed', 'processing', 'shipped', 'delivered'];
-        if (in_array($order->get_status(), $paid_statuses)) {
-            return true;
-        }
-        
-        // Verificar método de pago automático (tarjeta, etc.)
-        $automatic_payment_methods = ['redsys', 'stripe', 'paypal', 'dm_pay_later_card', 'bizum'];
+        // 4. Verificación específica para transferencias bancarias
         $payment_method = $order->get_payment_method();
+        if ($payment_method === 'bacs') {
+            // Para transferencias, usar la misma lógica que CheckoutBlocker
+            return !$this->bankTransferNeedsPayment($order);
+        }
         
-        if (in_array($payment_method, $automatic_payment_methods) && $order->get_date_paid()) {
+        // 5. Para otros métodos, sin indicadores confiables = NO pagado
+        return false;
+    }
+
+    /**
+     * Verificación específica para transferencias bancarias
+     * COPIADA EXACTAMENTE de CheckoutBlocker para mantener consistencia
+     * 
+     * @param \WC_Order $order Objeto de pedido de transferencia bancaria
+     * @return bool True si necesita pago, false en caso contrario
+     */
+    private function bankTransferNeedsPayment(\WC_Order $order): bool
+    {
+        $order_status = $order->get_status();
+        
+        // Verificar el meta _order_marked_as_paid primero
+        $marked_as_paid = $order->get_meta('_order_marked_as_paid');
+        if ($marked_as_paid === 'yes' || $marked_as_paid === '1' || $marked_as_paid === 1) {
+            return false; // Marcado como pagado manualmente
+        }
+        
+        // LÓGICA IDÉNTICA A CheckoutBlocker:
+        // Para transferencias bancarias completadas SIN indicadores de pago manual,
+        // SÍ necesita confirmación manual - NO se puede asumir que están pagadas
+        // INCLUIR ESTADOS PERSONALIZADOS: 'completed' y 'mast-complete'
+        if (in_array($order_status, ['completed', 'mast-complete'])) {
+            return true; // BLOQUEAR: transferencia completada sin confirmar pago
+        }
+
+        // Para estados que claramente indican pago pendiente
+        if (in_array($order_status, ['pending', 'on-hold', 'failed'])) {
             return true;
         }
-        
-        // Para métodos manuales, verificar meta específico o notas del pedido
-        $order_notes = wc_get_order_notes(['order_id' => $order->get_id(), 'type' => 'internal']);
-        foreach ($order_notes as $note) {
-            if (strpos(strtolower($note->content), 'payment received') !== false ||
-                strpos(strtolower($note->content), 'pago recibido') !== false ||
-                strpos(strtolower($note->content), 'paid manually') !== false) {
-                return true;
-            }
-        }
-        
-        return false;
+
+        // Para processing, usar needs_payment estándar de WooCommerce
+        return $order->needs_payment();
     }
 
     /**

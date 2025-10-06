@@ -161,6 +161,10 @@ class SchoolManagementBootstrap {
                 'SchoolManagement\Orders\TeacherOrderCountFilter' => [],
                 'SchoolManagement\Orders\TeacherPdfRestrictionsManager' => [],
                 'SchoolManagement\Orders\TeacherMasterOrderPdfRestrictions' => [],
+                'SchoolManagement\Orders\MSRPAccumulator' => [],
+                'SchoolManagement\Orders\MSRPTotalRecalculator' => [
+                    'store_global' => 'msrp_total_recalculator_instance'
+                ],
             ],
             
             // MÓDULOS DE PAGOS
