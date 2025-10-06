@@ -334,257 +334,32 @@ class OrderManager
      */
     public function maybeAddPaymentFilters(): void
     {
+        // DESACTIVADO: PaymentStatusColumn ya maneja todos los filtros de pago
+        // No añadir filtros duplicados para evitar select duplicados en el admin
+        
         // Si PaymentStatusColumn ya está activo, no añadir filtros duplicados
         if (class_exists('SchoolManagement\Payments\PaymentStatusColumn')) {
-            // PaymentStatusColumn maneja los filtros, pero nosotros podemos añadir funcionalidad adicional
-        }
-        
-        // Reactivar filtros de pago con prioridad diferente para evitar conflictos
-        add_action('restrict_manage_posts', [$this, 'addPaymentStatusFilter'], 15);
-        add_action('woocommerce_order_list_table_restrict_manage_orders', [$this, 'addPaymentStatusFilterHPOS'], 15);
-        add_filter('parse_query', [$this, 'handlePaymentStatusFiltering'], 15);
-        add_filter('woocommerce_order_list_table_prepare_items_query_args', [$this, 'handlePaymentStatusFilteringHPOS'], 15);
-    }
-
-    /**
-     * Add payment status filter for old system (CPT)
-     * 
-     * Creates three distinct filter categories:
-     * 1. Paid orders (all payment methods confirmed)
-     * 2. Unpaid bank transfers (require manual confirmation)  
-     * 3. Unpaid other methods (other payment methods pending)
-     * 
-     * @return void
-     */
-    public function addPaymentStatusFilter(): void
-    {
-        global $typenow;
-        
-        if ($typenow !== 'shop_order') {
+            // PaymentStatusColumn maneja los filtros completamente
             return;
         }
-
-        $current_filter = $_GET['om_payment_filter'] ?? '';
         
-        echo '<select name="om_payment_filter" style="float: none; margin-left: 10px;">';
-        echo '<option value="">' . esc_html__('All Orders', 'neve-child') . '</option>';
-        echo '<option value="paid"' . selected($current_filter, 'paid', false) . '>✅ ' . esc_html__('Paid (all methods)', 'neve-child') . '</option>';
-        echo '<option value="unpaid_transfer"' . selected($current_filter, 'unpaid_transfer', false) . '>🏦 ' . esc_html__('Pending Payment Bank Transfers', 'neve-child') . '</option>';
-        echo '<option value="unpaid_other"' . selected($current_filter, 'unpaid_other', false) . '>⏳ ' . esc_html__('Pending Payment', 'neve-child') . '</option>';
-        echo '</select>';
+        // Solo añadir si PaymentStatusColumn NO está disponible (fallback)
+        // add_action('restrict_manage_posts', [$this, 'addPaymentStatusFilter'], 15);
+        // add_action('woocommerce_order_list_table_restrict_manage_orders', [$this, 'addPaymentStatusFilterHPOS'], 15);
+        // add_filter('parse_query', [$this, 'handlePaymentStatusFiltering'], 15);
+        // add_filter('woocommerce_order_list_table_prepare_items_query_args', [$this, 'handlePaymentStatusFilteringHPOS'], 15);
     }
 
-    /**
-     * Add payment status filter for new system (HPOS)
-     * 
-     * Creates three distinct filter categories:
-     * 1. Paid orders (all payment methods confirmed)
-     * 2. Unpaid bank transfers (require manual confirmation)  
-     * 3. Unpaid other methods (other payment methods pending)
-     * 
-     * @return void
-     */
-    public function addPaymentStatusFilterHPOS(): void
-    {
-        $current_filter = $_GET['om_payment_filter'] ?? '';
-        
-        echo '<select name="om_payment_filter" style="float: none; margin-left: 10px;">';
-        echo '<option value="">' . esc_html__('All Orders', 'neve-child') . '</option>';
-        echo '<option value="paid"' . selected($current_filter, 'paid', false) . '>✅ ' . esc_html__('Paid (all methods)', 'neve-child') . '</option>';
-        echo '<option value="unpaid_transfer"' . selected($current_filter, 'unpaid_transfer', false) . '>🏦 ' . esc_html__('Pending Payment Bank Transfers', 'neve-child') . '</option>';
-        echo '<option value="unpaid_other"' . selected($current_filter, 'unpaid_other', false) . '>⏳ ' . esc_html__('Pending Payment', 'neve-child') . '</option>';
-        echo '</select>';
-    }
-
-    /**
-     * Handle payment status filtering for old system (CPT)
-     * 
-     * @param \WP_Query $query Query object
-     * @return void
-     */
-    public function handlePaymentStatusFiltering(\WP_Query $query): void
-    {
-        global $pagenow, $typenow;
-        
-        if ($pagenow !== 'edit.php' || $typenow !== 'shop_order' || !is_admin()) {
-            return;
-        }
-
-        $payment_filter = $_GET['om_payment_filter'] ?? '';
-        
-        if (empty($payment_filter)) {
-            return;
-        }
-
-        // Para filtros de pago, necesitamos usar un enfoque post-query porque la lógica es compleja
-        add_filter('posts_results', [$this, 'filterOrdersByPaymentStatus'], 10, 2);
-    }
-
-    /**
-     * Handle payment status filtering for new system (HPOS)
-     * 
-     * @param array $query_args Query arguments
-     * @return array Modified query arguments
-     */
-    public function handlePaymentStatusFilteringHPOS(array $query_args): array
-    {
-        $payment_filter = $_GET['om_payment_filter'] ?? '';
-        
-        if (empty($payment_filter)) {
-            return $query_args;
-        }
-
-        // Para HPOS con lógica compleja, necesitamos obtener todos los pedidos
-        try {
-            $all_orders = wc_get_orders([
-                'limit' => -1,
-                'return' => 'ids',
-                'status' => 'any',
-                'type' => 'shop_order' // Excluir reembolsos desde la consulta
-            ]);
-
-            $filtered_order_ids = [];
-
-            foreach ($all_orders as $order_id) {
-                $order = wc_get_order($order_id);
-                if (!$order) continue;
-
-                // Saltar reembolsos - no son pedidos normales
-                if (is_a($order, 'WC_Order_Refund') || is_a($order, 'Automattic\WooCommerce\Admin\Overrides\OrderRefund')) {
-                    continue;
-                }
-
-                $should_include = $this->shouldIncludeOrderInFilter($order, $payment_filter);
-                
-                if ($should_include) {
-                    $filtered_order_ids[] = $order_id;
-                }
-            }
-
-            // Si no hay resultados, añadir un ID inválido para mostrar cero resultados
-            if (empty($filtered_order_ids)) {
-                $filtered_order_ids = [0];
-            }
-
-            // Para HPOS, usar 'id' en lugar de 'post__in'
-            $query_args['id'] = $filtered_order_ids;
-
-        } catch (\Exception $e) {
-            // En caso de error, no modificar la query
-        }
-        
-        return $query_args;
-    }
-
-    /**
-     * Filter orders by payment status (post-query for CPT system)
-     * 
-     * @param array $posts Posts array
-     * @param \WP_Query $query Query object
-     * @return array Filtered posts
-     */
-    public function filterOrdersByPaymentStatus(array $posts, \WP_Query $query): array
-    {
-        // Solo aplicar en páginas de administración de pedidos
-        if (!is_admin() || !$query->is_main_query()) {
-            return $posts;
-        }
-
-        $screen = get_current_screen();
-        if (!$screen || $screen->id !== 'edit-shop_order') {
-            return $posts;
-        }
-
-        $payment_filter = $_GET['om_payment_filter'] ?? '';
-        if (empty($payment_filter)) {
-            return $posts;
-        }
-
-        $filtered_posts = [];
-
-        foreach ($posts as $post) {
-            if (!$post || $post->post_type !== 'shop_order') {
-                continue;
-            }
-
-            $order = wc_get_order($post->ID);
-            if (!$order) {
-                continue;
-            }
-
-            if ($this->shouldIncludeOrderInFilter($order, $payment_filter)) {
-                $filtered_posts[] = $post;
-            }
-        }
-
-        return $filtered_posts;
-    }
-
-    /**
-     * Determine if an order should be included in the filter
-     * 
-     * @param \WC_Order|\WC_Abstract_Order $order Order object (can be refund)
-     * @param string $filter Filter type
-     * @return bool Should include order
-     */
-    private function shouldIncludeOrderInFilter($order, string $filter): bool
-    {
-        // Si es un reembolso, nunca incluir en filtros de pago
-        if (is_a($order, 'WC_Order_Refund') || is_a($order, 'Automattic\WooCommerce\Admin\Overrides\OrderRefund')) {
-            return false;
-        }
-
-        $order_id = $order->get_id();
-        $is_paid = $this->isOrderReallyPaid($order);
-        $payment_method = $order->get_payment_method();
-        $order_status = $order->get_status();
-
-        $result = false;
-
-        switch ($filter) {
-            case 'paid':
-                // Todos los pedidos pagados
-                $result = $is_paid;
-                break;
-                
-            case 'unpaid_transfer':
-                // Sin pagar Y método de pago que requiere confirmación manual
-                $is_master_order = $order->get_meta('_is_master_order') === 'yes';
-                
-                if ($is_master_order) {
-                    // Para master orders: bacs/transferencia requieren confirmación manual
-                    $is_transfer = in_array($payment_method, ['bacs', 'transferencia']);
-                } else {
-                    // Para pedidos individuales: bacs/transferencia requieren confirmación, student_payment NO
-                    $is_transfer = in_array($payment_method, ['bacs', 'transferencia']);
-                }
-                
-                $result = !$is_paid && $is_transfer;
-                break;
-                
-            case 'unpaid_other':
-                // Sin pagar Y método de pago NO de confirmación manual
-                $is_master_order = $order->get_meta('_is_master_order') === 'yes';
-                
-                if ($is_master_order) {
-                    // Para master orders: todo excepto bacs/transferencia
-                    $is_transfer = in_array($payment_method, ['bacs', 'transferencia']);
-                } else {
-                    // Para pedidos individuales: todo excepto bacs/transferencia (student_payment va aquí)
-                    $is_transfer = in_array($payment_method, ['bacs', 'transferencia']);
-                }
-                
-                $result = !$is_paid && !$is_transfer;
-                break;
-                
-            default:
-                // Todos los pedidos (sin filtro)
-                $result = true;
-                break;
-        }
-
-        return $result;
-    }
+    // FUNCIONES DE FILTRADO DE PAGO ELIMINADAS:
+    // - addPaymentStatusFilter()
+    // - addPaymentStatusFilterHPOS()
+    // - handlePaymentStatusFiltering()
+    // - handlePaymentStatusFilteringHPOS()
+    // - filterOrdersByPaymentStatus()
+    // - shouldIncludeOrderInFilter()
+    // 
+    // RAZÓN: PaymentStatusColumn maneja toda la funcionalidad de filtrado de pago.
+    // Estas funciones estaban duplicadas y ya no se usan.
 
     /**
      * Verify if an order is really paid using the same logic as PaymentStatusColumn
