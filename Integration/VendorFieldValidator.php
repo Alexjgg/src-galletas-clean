@@ -67,6 +67,12 @@ class VendorFieldValidator
     private const VENDOR_POST_TYPE = 'coo_vendor';
 
     /**
+     * Control whether invoice numbers are editable or read-only
+     * Set to false to disable editing, true to enable editing
+     */
+    private const INVOICE_NUMBERS_EDITABLE = false;
+
+    /**
      * Constructor
      */
     public function __construct()
@@ -90,6 +96,16 @@ class VendorFieldValidator
         
         // Admin notices for validation errors
         add_action('admin_notices', [$this, 'showValidationErrors']);
+
+        // Auto-manage invoice numbers
+        add_action('acf/save_post', [$this, 'autoManageInvoiceNumbers'], 20);
+        
+        // Control field editability based on constant
+        if (!self::INVOICE_NUMBERS_EDITABLE) {
+            add_filter('acf/prepare_field', [$this, 'makeInvoiceNumbersReadOnly'], 10, 1);
+            add_action('admin_head', [$this, 'addInvoiceFieldsCSS']);
+            add_action('admin_footer', [$this, 'addInvoiceFieldsJS']);
+        }
     }
 
 
@@ -328,7 +344,16 @@ class VendorFieldValidator
             '_certificate',
             '_invoice_number',
             '_prefix',
-            '_suffix'
+            '_suffix',
+            '_credit_note_number',
+            '_credit_note_prefix',
+            '_credit_note_suffix',
+            '_simplified_invoice_number',
+            '_simplified_prefix',
+            '_simplified_suffix',
+            '_simplified_credit_note_number',
+            '_simplified_credit_note_prefix',
+            '_simplified_credit_note_suffix'
         ];
 
         $this->data = [];
@@ -378,7 +403,16 @@ class VendorFieldValidator
             '_certificate' => __('Digital Certificate', 'neve-child'),
             '_invoice_number' => __('Invoice Number', 'neve-child'),
             '_prefix' => __('Invoice Prefix', 'neve-child'),
-            '_suffix' => __('Invoice Suffix', 'neve-child')
+            '_suffix' => __('Invoice Suffix', 'neve-child'),
+            '_credit_note_number' => __('Credit Note Number', 'neve-child'),
+            '_credit_note_prefix' => __('Credit Note Prefix', 'neve-child'),
+            '_credit_note_suffix' => __('Credit Note Suffix', 'neve-child'),
+            '_simplified_invoice_number' => __('Simplified Invoice Number', 'neve-child'),
+            '_simplified_prefix' => __('Simplified Invoice Prefix', 'neve-child'),
+            '_simplified_suffix' => __('Simplified Invoice Suffix', 'neve-child'),
+            '_simplified_credit_note_number' => __('Simplified Credit Note Number', 'neve-child'),
+            '_simplified_credit_note_prefix' => __('Simplified Credit Note Prefix', 'neve-child'),
+            '_simplified_credit_note_suffix' => __('Simplified Credit Note Suffix', 'neve-child')
         ];
 
         return $field_names[$field_name] ?? $field_name;
@@ -403,8 +437,10 @@ class VendorFieldValidator
             '_personTypeCode', '_taxIdentificationNumber', '_phone', '_email', 
             '_Name', '_firstSurname', '_secondSurname', '_corporateName',
             '_address', '_town', '_postCode', '_province', '_legalLiteral',
-            '_filename', '_certificate', '_invoice_number', '_sufijo', '_prefijo',
-            '_InvoicePrefix', '_InvoiceSuffix'
+            '_filename', '_certificate', '_invoice_number', '_prefix', '_suffix',
+            '_credit_note_number', '_credit_note_prefix', '_credit_note_suffix',
+            '_simplified_invoice_number', '_simplified_prefix', '_simplified_suffix',
+            '_simplified_credit_note_number', '_simplified_credit_note_prefix', '_simplified_credit_note_suffix'
         ];
 
         foreach ($known_fields as $field_name) {
@@ -456,10 +492,17 @@ class VendorFieldValidator
             '_filename',
             '_certificate',
             '_invoice_number',
-            '_sufijo',
-            '_prefijo',
-            '_InvoicePrefix',
-            '_InvoiceSuffix'
+            '_prefix',
+            '_suffix',
+            '_credit_note_number',
+            '_credit_note_prefix',
+            '_credit_note_suffix',
+            '_simplified_invoice_number',
+            '_simplified_prefix',
+            '_simplified_suffix',
+            '_simplified_credit_note_number',
+            '_simplified_credit_note_prefix',
+            '_simplified_credit_note_suffix'
         ];
 
         return in_array($field_name, $vendor_fields);
@@ -960,5 +1003,257 @@ class VendorFieldValidator
     public function setFormData(array $data): void
     {
         $this->data = $data;
+    }
+
+    /**
+     * Auto-manage invoice numbers for both regular and simplified invoices
+     * Automatically generates the next sequential number if not set
+     * 
+     * @param int $post_id
+     */
+    public function autoManageInvoiceNumbers($post_id): void
+    {
+        // Only process vendor posts
+        if (!$this->isVendorPost($post_id)) {
+            return;
+        }
+
+        // Get or generate regular invoice number
+        $invoice_number = get_field('_invoice_number', $post_id);
+        if (empty($invoice_number)) {
+            $next_invoice_number = $this->getNextInvoiceNumber('regular');
+            update_field('_invoice_number', $next_invoice_number, $post_id);
+        }
+
+        // Get or generate simplified invoice number
+        $simplified_invoice_number = get_field('_simplified_invoice_number', $post_id);
+        if (empty($simplified_invoice_number)) {
+            $next_simplified_number = $this->getNextInvoiceNumber('simplified');
+            update_field('_simplified_invoice_number', $next_simplified_number, $post_id);
+        }
+
+        // Get or generate credit note number
+        $credit_note_number = get_field('_credit_note_number', $post_id);
+        if (empty($credit_note_number)) {
+            $next_credit_number = $this->getNextInvoiceNumber('credit');
+            update_field('_credit_note_number', $next_credit_number, $post_id);
+        }
+
+        // Get or generate simplified credit note number
+        $simplified_credit_number = get_field('_simplified_credit_note_number', $post_id);
+        if (empty($simplified_credit_number)) {
+            $next_simplified_credit = $this->getNextInvoiceNumber('simplified_credit');
+            update_field('_simplified_credit_note_number', $next_simplified_credit, $post_id);
+        }
+    }
+
+    /**
+     * Get the next sequential invoice number based on existing vendor posts
+     * 
+     * @param string $type Type of number: 'regular', 'simplified', 'credit', 'simplified_credit'
+     * @return int
+     */
+    private function getNextInvoiceNumber($type): int
+    {
+        $field_map = [
+            'regular' => '_invoice_number',
+            'simplified' => '_simplified_invoice_number', 
+            'credit' => '_credit_note_number',
+            'simplified_credit' => '_simplified_credit_note_number'
+        ];
+
+        $field_name = $field_map[$type] ?? '_invoice_number';
+
+        // Query all vendor posts to find the highest number
+        $args = [
+            'post_type' => self::VENDOR_POST_TYPE,
+            'posts_per_page' => -1,
+            'post_status' => ['publish', 'draft', 'private'],
+            'meta_query' => [
+                [
+                    'key' => $field_name,
+                    'compare' => 'EXISTS'
+                ]
+            ]
+        ];
+
+        $vendors = get_posts($args);
+        $max_number = 0;
+
+        foreach ($vendors as $vendor) {
+            $number = (int) get_field($field_name, $vendor->ID);
+            if ($number > $max_number) {
+                $max_number = $number;
+            }
+        }
+
+        return $max_number + 1;
+    }
+
+    /**
+     * Make invoice number fields read-only when INVOICE_NUMBERS_EDITABLE is false
+     * 
+     * @param array $field
+     * @return array
+     */
+    public function makeInvoiceNumbersReadOnly($field): array
+    {
+        // List of invoice number fields to make read-only
+        $invoice_fields = [
+            '_invoice_number',
+            '_simplified_invoice_number',
+            '_credit_note_number', 
+            '_simplified_credit_note_number'
+        ];
+
+        // Check if this field should be read-only
+        if (in_array($field['name'], $invoice_fields)) {
+            // Make field read-only
+            $field['readonly'] = 1;
+            $field['disabled'] = 1;
+            
+            // Add instruction message
+            $field['instructions'] = __('This field is automatically managed by the system and cannot be edited.', 'neve-child');
+            
+            // Add custom CSS for visual feedback
+            $field['wrapper']['class'] = $field['wrapper']['class'] ?? '';
+            $field['wrapper']['class'] .= ' acf-readonly-field';
+        }
+
+        return $field;
+    }
+
+    /**
+     * Check if invoice numbers are currently editable
+     * 
+     * @return bool
+     */
+    public static function areInvoiceNumbersEditable(): bool
+    {
+        return self::INVOICE_NUMBERS_EDITABLE;
+    }
+
+    /**
+     * Get the status of invoice number editability as a readable string
+     * 
+     * @return string
+     */
+    public static function getInvoiceNumberStatus(): string
+    {
+        return self::INVOICE_NUMBERS_EDITABLE 
+            ? __('Editable', 'neve-child')
+            : __('Read-only (Auto-managed)', 'neve-child');
+    }
+
+    /**
+     * Add CSS to make invoice fields visually disabled
+     */
+    public function addInvoiceFieldsCSS(): void
+    {
+        global $post;
+        
+        // Only apply on vendor posts
+        if (!$post || !$this->isVendorPost($post->ID)) {
+            return;
+        }
+
+        ?>
+        <style type="text/css">
+            /* Make invoice number fields visually disabled */
+            .acf-field[data-name="_invoice_number"] input,
+            .acf-field[data-name="_simplified_invoice_number"] input,
+            .acf-field[data-name="_credit_note_number"] input,
+            .acf-field[data-name="_simplified_credit_note_number"] input {
+                background-color: #f1f1f1 !important;
+                color: #666 !important;
+                cursor: not-allowed !important;
+                opacity: 0.6 !important;
+                pointer-events: none !important;
+            }
+
+            /* Add locked icon to field labels */
+            .acf-field[data-name="_invoice_number"] .acf-label label::after,
+            .acf-field[data-name="_simplified_invoice_number"] .acf-label label::after,
+            .acf-field[data-name="_credit_note_number"] .acf-label label::after,
+            .acf-field[data-name="_simplified_credit_note_number"] .acf-label label::after {
+                content: " 🔒";
+                color: #999;
+                font-size: 12px;
+            }
+
+            /* Style the wrapper */
+            .acf-readonly-field {
+                opacity: 0.8;
+            }
+        </style>
+        <?php
+    }
+
+    /**
+     * Add JavaScript to completely disable invoice number fields
+     */
+    public function addInvoiceFieldsJS(): void
+    {
+        global $post;
+        
+        // Only apply on vendor posts
+        if (!$post || !$this->isVendorPost($post->ID)) {
+            return;
+        }
+
+        ?>
+        <script type="text/javascript">
+        jQuery(document).ready(function($) {
+            // List of invoice number fields to disable
+            var invoiceFields = [
+                '_invoice_number',
+                '_simplified_invoice_number', 
+                '_credit_note_number',
+                '_simplified_credit_note_number'
+            ];
+
+            // Function to disable invoice fields
+            function disableInvoiceFields() {
+                $.each(invoiceFields, function(index, fieldName) {
+                    var $field = $('.acf-field[data-name="' + fieldName + '"]');
+                    var $input = $field.find('input');
+                    
+                    if ($input.length > 0) {
+                        // Make input readonly and disabled
+                        $input.prop('readonly', true);
+                        $input.prop('disabled', true);
+                        $input.attr('tabindex', '-1');
+                        
+                        // Prevent all input events
+                        $input.on('keydown keyup keypress change input paste', function(e) {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            return false;
+                        });
+
+                        // Add visual indication
+                        $input.addClass('acf-disabled-field');
+                        
+                        // Show tooltip on hover
+                        $input.attr('title', '<?php echo esc_js(__('This field is automatically managed by the system', 'neve-child')); ?>');
+                    }
+                });
+            }
+
+            // Run immediately
+            disableInvoiceFields();
+
+            // Run after ACF loads fields (for dynamic content)
+            $(document).on('acf/setup_fields', function() {
+                setTimeout(disableInvoiceFields, 100);
+            });
+
+            // Run on window load as backup
+            $(window).on('load', function() {
+                setTimeout(disableInvoiceFields, 500);
+            });
+        });
+        </script>
+        <?php
     }
 }

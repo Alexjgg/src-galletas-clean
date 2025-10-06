@@ -88,10 +88,7 @@ class VendorPDFManager
      */
     public function applyVendorNumbering($formatted_number, $document, $document_type = null, $order = null)
     {
-        error_log("🔥 VendorPDFManager applyVendorNumbering INICIADO - formatted_number: " . var_export($formatted_number, true));
-        
         if (!is_object($document)) {
-            error_log("❌ VendorPDFManager: Saliendo - document no es objeto");
             return $formatted_number;
         }
 
@@ -100,12 +97,9 @@ class VendorPDFManager
             $document_type = $document->get_type();
         }
         
-        error_log("🔥 VendorPDFManager: document_type detectado: " . var_export($document_type, true));
-        
         // Tipos de documento soportados
         $supported_types = ['invoice', 'simplified-invoice', 'credit-note', 'simplified-credit-note'];
         if (!in_array($document_type, $supported_types)) {
-            error_log("❌ VendorPDFManager: Saliendo - document_type '{$document_type}' no soportado");
             return $formatted_number;
         }
 
@@ -115,43 +109,29 @@ class VendorPDFManager
             $order_id = is_numeric($order) ? $order : (is_object($order) && method_exists($order, 'get_id') ? $order->get_id() : null);
         }
         
-        error_log("🔥 VendorPDFManager: order_id detectado: " . var_export($order_id, true));
-        
         if (!$order_id) {
-            error_log("❌ VendorPDFManager: Saliendo - no se pudo obtener order_id");
             return $formatted_number;
         }
         
         // Obtener vendor ID SIEMPRE (independiente de la numeración)
         $vendor_id = $this->getVendorId($order_id);
-        error_log("🔥 VendorPDFManager: vendor_id detectado: " . var_export($vendor_id, true));
         
         if (!$vendor_id) {
-            error_log("❌ VendorPDFManager: Saliendo - no se pudo obtener vendor_id para order {$order_id}");
             return $formatted_number;
         }
-        
-        error_log("✅ VendorPDFManager: Todos los checks pasaron - Llegando a shouldApplyCustomNumbering para order {$order_id}, document_type {$document_type}, vendor {$vendor_id}");
             // Verificar si debemos aplicar numeración personalizada
         if (!$this->shouldApplyCustomNumbering($document_type, $order_id)) {
             // NO aplicar numeración personalizada, pero SÍ procesar Tax ID
             // (Este es el caso de las facturas normales que ya tienen número)
             
-            error_log("VendorPDFManager: No aplicando numeración personalizada - Documento: {$document_type}, Order: {$order_id}");
-            
             // 🔧 FIX: Obtener el número correcto del meta en lugar de confiar en $formatted_number
             $normalized_document_type = str_replace('-', '_', $document_type);
             $existing_meta = get_post_meta($order_id, "_wcpdf_{$normalized_document_type}_number", true);
             
-            error_log("VendorPDFManager: Meta existente para '_wcpdf_{$normalized_document_type}_number': " . var_export($existing_meta, true));
-            error_log("VendorPDFManager: Número formateado recibido: " . var_export($formatted_number, true));
-            
             if (!empty($existing_meta)) {
-            error_log("VendorPDFManager: Devolviendo número existente del meta: {$existing_meta}");
-            return $existing_meta; // Devolver el número guardado (ej: "00001-2025")
+                return $existing_meta; // Devolver el número guardado (ej: "00001-2025")
             }
             
-            error_log("VendorPDFManager: No hay meta existente, devolviendo número formateado original: {$formatted_number}");
             return $formatted_number; // Fallback al número original si no hay meta
         }
 
@@ -966,11 +946,8 @@ class VendorPDFManager
      */
     private function shouldApplyCustomNumbering($document_type, $order_id)
     {
-        error_log("🎯 VendorPDFManager shouldApplyCustomNumbering EJECUTÁNDOSE - document_type: '{$document_type}', order_id: {$order_id}");
-        
         // SIEMPRE aplicar para credit notes (notas de crédito)
         if (strpos($document_type, 'credit-note') !== false) {
-            error_log("✅ shouldApplyCustomNumbering: Es credit-note, devolviendo TRUE");
             return true;
         }
         
@@ -980,16 +957,12 @@ class VendorPDFManager
             $normalized_document_type = str_replace('-', '_', $document_type);
             $existing_meta = get_post_meta($order_id, "_wcpdf_{$normalized_document_type}_number", true);
             
-            error_log("🔍 shouldApplyCustomNumbering: Document type '{$document_type}' normalizado a '{$normalized_document_type}', meta encontrado: " . var_export($existing_meta, true));
-            
             $result = empty($existing_meta);
-            error_log("📋 shouldApplyCustomNumbering: empty(\$existing_meta) = " . ($result ? 'TRUE' : 'FALSE') . " - " . ($result ? 'SÍ aplicar numeración' : 'NO aplicar numeración'));
             
             // Solo aplicar si NO tiene número previo
             return $result;
         }
         
-        error_log("❌ shouldApplyCustomNumbering: No es invoice ni credit-note, devolviendo FALSE");
         return false;
     }
 
