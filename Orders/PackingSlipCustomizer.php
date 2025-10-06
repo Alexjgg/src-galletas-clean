@@ -96,30 +96,43 @@ class PackingSlipCustomizer
             return;
         }
 
-        // No mostrar para pedidos maestros
-        if ($order->get_meta('_is_master_order') === 'yes') {
-            return;
-        }
+        // Verificar si es pedido maestro
+        $is_master_order = $order->get_meta('_is_master_order') === 'yes';
 
-        // Obtener datos del estudiante
+        // Obtener datos del estudiante/maestro
         $student_name_parts = $this->getStudentNameParts($order);
         $student_number = $this->getStudentNumber($order);
         $total_boxes = $this->getTotalBoxes($order);
         $school_name = $this->getSchoolName($order);
 
+        // 🔍 DEBUG: Mostrar información para debugging
+        // echo "<!-- DEBUG: is_master_order={$is_master_order}, student_number={$student_number}, total_boxes={$total_boxes} -->";
+
         ?>
-        <?php if (!empty($student_number)): ?>
+        <?php if ($is_master_order): ?>
+            <!-- 🎯 PEDIDOS MAESTROS -->
+            <div class="master-order-info-box" style="margin: 20px 0; background-color: #ffffff; border: 4px solid #000000; border-radius: 8px; text-align: center; width: 120px; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 15px; color: #000000; font-family: Arial, sans-serif; outline: 4px solid #000000;">
+                <div class="master-order-label" style="font-size: 16px; font-weight: bold; color: #000000; line-height: 1; margin: 0;">
+                    <?php echo __('MASTER ORDER', 'neve-child'); ?>
+                </div>
+                <div class="total-boxes" style="margin-top: 8px; font-size: 14px; font-weight: normal; color: #000000; line-height: 1;">
+                    <?php echo sprintf(__('Nº boxes: %s', 'neve-child'), esc_html($total_boxes)); ?>
+                </div>
+            </div>
+        <?php elseif (!empty($student_number)): ?>
+            <!-- 🎯 ESTUDIANTES CON NÚMERO -->
             <div class="student-info-box with-student-number" style="margin: 20px 0; background-color: #ffffff; border: 4px solid #000000; border-radius: 8px; text-align: center; width: 120px; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 15px; color: #000000; font-family: Arial, sans-serif; outline: 4px solid #000000;">
                 <div class="student-number" style="font-size: 28px; font-weight: bold; color: #000000; line-height: 1; margin: 0;">
                     <?php echo sprintf(__('Nº %s', 'neve-child'), esc_html($student_number)); ?>
                 </div>
                 <div class="total-boxes" style="margin-top: 8px; font-size: 14px; font-weight: normal; color: #000000; line-height: 1;">
-                    <?php echo sprintf(__('Nº de cajas: %s', 'neve-child'), esc_html($total_boxes)); ?>
+                    <?php echo sprintf(__('Nº boxes: %s', 'neve-child'), esc_html($total_boxes)); ?>
                 </div>
             </div>
         <?php else: ?>
+            <!-- 🎯 OTROS CASOS (solo número de cajas) -->
             <div class="student-info-box total-boxes-only" style="margin: 20px 0; background-color: #ffffff; border: 4px solid #000000; border-radius: 8px; text-align: center; width: 120px; display: flex; align-items: center; justify-content: center; padding: 15px; font-size: 16px; font-weight: bold; color: #000000; font-family: Arial, sans-serif; outline: 4px solid #000000;">
-                <?php echo sprintf(__('Nº de cajas: %s', 'neve-child'), esc_html($total_boxes)); ?>
+                <?php echo sprintf(__('Nº boxes: %s', 'neve-child'), esc_html($total_boxes)); ?>
             </div>
         <?php endif; ?>
         <?php

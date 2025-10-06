@@ -75,14 +75,14 @@ class MSRPAccumulator
         
         // ⚠️ COMMENT THE LINE ABOVE AFTER RUNNING ONCE ⚠️
         
-        // Hook when order status changes to completed/processing (order paid)
+        // Hook when order status changes to completed/reviewed (order validated/paid)
         add_action('woocommerce_order_status_completed', [$this, 'addOrderMSRPToUser'], 10, 2);
-        add_action('woocommerce_order_status_processing', [$this, 'addOrderMSRPToUser'], 10, 2);
+        add_action('woocommerce_order_status_reviewed', [$this, 'addOrderMSRPToUser'], 10, 2);
         
         // Hook when refund is created
         add_action('woocommerce_order_refunded', [$this, 'subtractRefundMSRPFromUser'], 10, 2);
         
-        // Hook when order status changes from completed/processing to cancelled/failed (subtract)
+        // Hook when order status changes from completed/reviewed to cancelled/failed (subtract)
         add_action('woocommerce_order_status_cancelled', [$this, 'subtractOrderMSRPFromUser'], 10, 2);
         add_action('woocommerce_order_status_failed', [$this, 'subtractOrderMSRPFromUser'], 10, 2);
         
@@ -101,7 +101,7 @@ class MSRPAccumulator
     }
 
     /**
-     * Add order MSRP total to user when order is completed/processing
+     * Add order MSRP total to user when order is completed/reviewed
      * 
      * @param int $order_id Order ID
      * @param \WC_Order $order Order object
@@ -136,13 +136,22 @@ class MSRPAccumulator
             return;
         }
 
+        // 🎯 CÁLCULO CORRECTO: Solo usar MSRP base, los refunds se procesan por separado en su propio hook
+        $final_msrp_total = $order_msrp_total;
+
+        // 🔍 DEBUG: Log del cálculo para auditoría
+        $this->logOrderMSRPCalculation($user_id, $order_id, $order_msrp_total, $final_msrp_total, $order->get_refunds());
+
         // Save order MSRP total in order meta
-        $order->update_meta_data(self::ORDER_MSRP_TOTAL_META, $order_msrp_total);
+        $order->update_meta_data(self::ORDER_MSRP_TOTAL_META, $final_msrp_total);
         $order->update_meta_data('_msrp_processed', 'yes');
         $order->save();
 
         // Add to user's accumulated total
-        $this->addToUserMSRPTotal($user_id, $order_msrp_total, $order_id, 'order_completed');
+        $this->addToUserMSRPTotal($user_id, $final_msrp_total, $order_id, 'order_completed');
+
+        // 🎯 PROCESAR REFUNDS EXISTENTES: Si el pedido tiene refunds que no se procesaron antes
+        $this->processExistingRefundsForOrder($order, $user_id);
     }
 
     /**
@@ -214,6 +223,14 @@ class MSRPAccumulator
             return;
         }
 
+        // 🎯 PROTECCIÓN: No procesar refunds si el pedido no está validado
+        // Solo procesar refunds de pedidos completed/reviewed
+        $order_status = $order->get_status();
+        if (!in_array($order_status, ['completed', 'reviewed'])) {
+            self::$processing_refund = false;
+            return;
+        }
+
         // Calculate MSRP for refunded items
         $refund_msrp_total = $this->calculateOrderMSRPTotal($refund);
         
@@ -233,8 +250,9 @@ class MSRPAccumulator
         // También necesitamos restar del total de ventas el monto del reembolso
         $this->updateUserIncomingAfterRefund($user_id, $refund);
 
-        // Store refund MSRP total for reference
+        // Store refund MSRP total for reference and mark as processed
         $refund->update_meta_data(self::ORDER_MSRP_TOTAL_META, $refund_msrp_total);
+        $refund->update_meta_data('_msrp_refund_processed', 'yes');
         $refund->save();
         
         // DESACTIVAR bandera - reembolso completado
@@ -319,6 +337,8 @@ class MSRPAccumulator
         
         return $total_msrp;
     }
+
+
 
     /**
      * Add amount to user's MSRP total
@@ -447,6 +467,84 @@ class MSRPAccumulator
     }
 
     /**
+     * Log detailed order MSRP calculation for debugging
+     * 
+     * @param int $user_id User ID
+     * @param int $order_id Order ID
+     * @param float $base_msrp Base MSRP before refunds
+     * @param float $final_msrp Final MSRP after refunds
+     * @param array $refunds Array of refunds
+     * @return void
+     */
+    private function logOrderMSRPCalculation(int $user_id, int $order_id, float $base_msrp, float $final_msrp, array $refunds): void
+    {
+        $refund_details = [];
+        $total_refund_msrp = 0.0;
+        
+        foreach ($refunds as $refund) {
+            $refund_msrp = $this->calculateOrderMSRPTotal($refund);
+            $refund_details[] = [
+                'refund_id' => $refund->get_id(),
+                'refund_msrp' => abs($refund_msrp)
+            ];
+            $total_refund_msrp += abs($refund_msrp);
+        }
+        
+        $log_entry = [
+            'timestamp' => current_time('mysql'),
+            'user_id' => $user_id,
+            'order_id' => $order_id,
+            'base_msrp' => $base_msrp,
+            'final_msrp' => $final_msrp,
+            'total_refund_msrp' => $total_refund_msrp,
+            'refund_count' => count($refunds),
+            'refund_details' => $refund_details,
+            'calculation' => "{$base_msrp} - {$total_refund_msrp} = {$final_msrp}",
+            'type' => 'order_msrp_calculation'
+        ];
+        
+        // Get existing calculation log
+        $calc_log = get_user_meta($user_id, '_msrp_calculation_log', true);
+        if (!is_array($calc_log)) {
+            $calc_log = [];
+        }
+        
+        // Add new entry
+        $calc_log[] = $log_entry;
+        
+        // Keep only last 50 entries
+        if (count($calc_log) > 50) {
+            $calc_log = array_slice($calc_log, -50);
+        }
+        
+        update_user_meta($user_id, '_msrp_calculation_log', $calc_log);
+    }
+
+    /**
+     * Get user's MSRP calculation log
+     * 
+     * @param int $user_id User ID
+     * @param int $limit Number of entries to return (default: 25)
+     * @return array Calculation log
+     */
+    public function getUserCalculationLog(int $user_id, int $limit = 25): array
+    {
+        $log = get_user_meta($user_id, '_msrp_calculation_log', true);
+        if (!is_array($log)) {
+            return [];
+        }
+        
+        // Return most recent entries first
+        $log = array_reverse($log);
+        
+        if ($limit > 0) {
+            return array_slice($log, 0, $limit);
+        }
+        
+        return $log;
+    }
+
+    /**
      * Get user's current MSRP total
      * 
      * @param int $user_id User ID
@@ -506,6 +604,51 @@ class MSRPAccumulator
     }
 
     /**
+     * Process existing refunds for an order that just became validated
+     * This handles refunds that were created while the order was in processing status
+     * 
+     * @param \WC_Order $order Order object
+     * @param int $user_id User ID
+     * @return void
+     */
+    private function processExistingRefundsForOrder(\WC_Order $order, int $user_id): void
+    {
+        $refunds = $order->get_refunds();
+        
+        if (empty($refunds)) {
+            return;
+        }
+        
+        foreach ($refunds as $refund) {
+            $refund_id = $refund->get_id();
+            
+            // Verificar si este refund ya fue procesado
+            $refund_processed = $refund->get_meta('_msrp_refund_processed');
+            if ($refund_processed === 'yes') {
+                continue; // Ya fue procesado
+            }
+            
+            // Calcular MSRP del refund
+            $refund_msrp = $this->calculateOrderMSRPTotal($refund);
+            $refund_msrp = abs($refund_msrp);
+            
+            if ($refund_msrp <= 0) {
+                continue;
+            }
+            
+            // Restar del total del usuario
+            $this->subtractFromUserMSRPTotal($user_id, $refund_msrp, $refund_id, 'existing_refund_processed');
+            
+            // Marcar como procesado
+            $refund->update_meta_data('_msrp_refund_processed', 'yes');
+            $refund->save();
+            
+            // Log para auditoría
+            $this->logMSRPChange($user_id, $refund_msrp, $this->getUserMSRPTotal($user_id), $refund_id, 'existing_refund_processed', 'subtract');
+        }
+    }
+
+    /**
      * Recalculate user's MSRP total from all orders (for correction purposes)
      * 
      * @param int $user_id User ID
@@ -520,10 +663,10 @@ class MSRPAccumulator
         
         $total = 0.0;
 
-        // Get all completed/processing orders for this user
+        // Get all completed/reviewed orders for this user
         $orders = wc_get_orders([
             'customer_id' => $user_id,
-            'status' => ['completed', 'processing'],
+            'status' => ['completed', 'reviewed'],
             'limit' => -1,
             'type' => 'shop_order'
         ]);
@@ -605,12 +748,16 @@ class MSRPAccumulator
         $log = $this->getUserMSRPLog($user_id, 10);
         $duplicates = $this->getUserDuplicateLog($user_id, 5);
         
+        $calculations = $this->getUserCalculationLog($user_id, 5);
+        
         wp_send_json_success([
             'user_id' => $user_id,
             'total' => $total,
             'recent_changes' => $log,
             'duplicate_attempts' => $duplicates,
-            'duplicate_count' => count($duplicates)
+            'duplicate_count' => count($duplicates),
+            'calculation_details' => $calculations,
+            'calculation_count' => count($calculations)
         ]);
     }
 
@@ -631,7 +778,7 @@ class MSRPAccumulator
         // Obtener todos los pedidos completados del usuario
         $orders = wc_get_orders([
             'customer_id' => $user_id,
-            'status' => ['completed', 'processing'],
+            'status' => ['completed', 'reviewed'],
             'limit' => -1,
             'type' => 'shop_order'
         ]);
@@ -695,8 +842,8 @@ class MSRPAccumulator
         }
         
         // Solo actualizar si el cambio afecta a las ventas totales
-        // (de/hacia completed/processing que son estados que cuentan para total sales)
-        $sales_statuses = ['completed', 'processing'];
+        // (de/hacia completed/reviewed que son estados que cuentan para total sales)
+        $sales_statuses = ['completed', 'reviewed'];
         
         $old_counts = in_array($old_status, $sales_statuses);
         $new_counts = in_array($new_status, $sales_statuses);
@@ -737,7 +884,7 @@ class MSRPAccumulator
         $total_sales = 0.0;
         $orders = wc_get_orders([
             'customer_id' => $user_id,
-            'status' => ['completed', 'processing'],
+            'status' => ['completed', 'reviewed'],
             'limit' => -1,
             'type' => 'shop_order'
         ]);
@@ -858,7 +1005,7 @@ class MSRPAccumulator
         // Get all existing orders for the user (excluding trashed/deleted ones)
         $orders = wc_get_orders([
             'customer_id' => $user_id,
-            'status' => ['completed', 'processing'], // Only count paid orders
+            'status' => ['completed', 'reviewed'], // Only count paid orders
             'limit' => -1,
             'type' => 'shop_order'
         ]);
