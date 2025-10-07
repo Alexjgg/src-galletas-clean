@@ -728,6 +728,11 @@ class StatusManager
             'mark_bank_transfers_unpaid'
         ];
 
+        // ✅ EXCEPCIÓN PARA ADMINISTRADORES: Permitir cancelación masiva
+        if ($action === 'mark_cancelled' && current_user_can('administrator')) {
+            $allowed_master_actions[] = 'mark_cancelled';
+        }
+
         // Si la acción está permitida para master orders, continuar normal
         if (in_array($action, $allowed_master_actions)) {
             return $redirect_to;
@@ -778,10 +783,16 @@ class StatusManager
         $revert_change = false;
         $error_message = '';
 
-        // 1. Verificar que sea un estado válido para master orders
+        // ✅ EXCEPCIÓN PARA ADMINISTRADORES: Permitir cambio a "cancelled"
+        if ($new_status === 'cancelled' && current_user_can('administrator')) {
+            // Los administradores pueden cancelar master orders sin restricciones
+            return;
+        }
+
+        // 1. Verificar que sea un estado válido para master orders (con excepción de cancelled para admins)
         if (!in_array($new_status, self::MASTER_ORDER_STATUSES)) {
             $revert_change = true;
-            $error_message = __('Status change blocked: Master validated orders can only use master-order statuses (master-order, mast-warehs, mast-prepared, mast-complete).', 'neve-child');
+            $error_message = __('Status change blocked: Master validated orders can only use master-order statuses (master-order, mast-warehs, mast-prepared, mast-complete). Administrators can also cancel orders.', 'neve-child');
         }
         
         // 2. ÚNICA RESTRICCIÓN: No permitir volver a 'master-order' una vez que se ha salido de él

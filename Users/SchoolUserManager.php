@@ -636,7 +636,7 @@ class SchoolUserManager
         try {
             // Buscar el último número con bloqueo
             $last_number = $wpdb->get_var($wpdb->prepare("
-                SELECT MAX(CAST(meta_value AS UNSIGNED)) 
+                SELECT MAX(CAST(um1.meta_value AS UNSIGNED)) 
                 FROM {$wpdb->usermeta} um1
                 INNER JOIN {$wpdb->usermeta} um2 ON um1.user_id = um2.user_id
                 WHERE um1.meta_key = 'user_number' 

@@ -24,10 +24,21 @@ if (!defined('ABSPATH')) {
 class PackingSlipCustomizer
 {
     /**
+     * Flag para prevenir múltiples ejecuciones
+     */
+    private static $instance_running = false;
+
+    /**
      * Constructor
      */
     public function __construct()
     {
+        // Prevenir múltiples instancias
+        if (self::$instance_running) {
+            return;
+        }
+        self::$instance_running = true;
+        
         $this->initHooks();
     }
 
@@ -57,6 +68,24 @@ class PackingSlipCustomizer
         add_filter('wpo_wcpdf_formatted_shop_vat_number', [$this, 'filterPackingSlipTaxId'], 5, 2);
         add_filter('wpo_wcpdf_coc_number_settings_text', [$this, 'filterPackingSlipTaxId'], 5, 2);
         add_filter('wpo_wcpdf_vat_number_settings_text', [$this, 'filterPackingSlipTaxId'], 5, 2);
+        
+        // 🎯 HOOKS PARA OCULTAR MÉTODO DE PAGO EN PACKING SLIPS
+        add_filter('woocommerce_order_get_payment_method_title', [$this, 'hidePaymentMethodInPdf'], 10, 2);
+        add_filter('wpo_wcpdf_order_payment_method', [$this, 'hidePaymentMethodInPdf'], 10, 2);
+        add_action('wpo_wcpdf_before_order_details', [$this, 'hidePaymentMethodSection'], 10, 2);
+        
+        // 🎯 HOOKS PARA OCULTAR DIRECCIÓN DE LA EMPRESA EN PACKING SLIPS
+        add_filter('wpo_wcpdf_shop_address', [$this, 'hideCompanyAddressInPackingSlip'], 10, 2);
+        add_filter('wpo_wcpdf_formatted_shop_address', [$this, 'hideCompanyAddressInPackingSlip'], 10, 2);
+        add_action('wpo_wcpdf_before_order_details', [$this, 'hideCompanyAddressSection'], 5, 2);
+        
+        // 🎯 HOOKS PARA OPTIMIZAR TABLA Y QUITAR FOOTER
+        add_action('wpo_wcpdf_before_order_details', [$this, 'optimizeTableForSpace'], 1, 2);
+        
+        // 🎯 HOOKS PARA ELIMINAR COMPLETAMENTE EL FOOTER
+        add_filter('wpo_wcpdf_footer', [$this, 'hideRgpdFooterInPackingSlip'], 10, 2);
+        add_action('wpo_wcpdf_after_order_details', [$this, 'removeFooterContent'], 999, 2);
+        add_action('wpo_wcpdf_after_document', [$this, 'removeFooterContent'], 999, 2);
     }
 
     /**
@@ -111,7 +140,7 @@ class PackingSlipCustomizer
         ?>
         <?php if ($is_master_order): ?>
             <!-- 🎯 PEDIDOS MAESTROS -->
-            <div class="master-order-info-box" style="margin: 20px 0; background-color: #ffffff; border: 4px solid #000000; border-radius: 8px; text-align: center; width: 120px; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 15px; color: #000000; font-family: Arial, sans-serif; outline: 4px solid #000000;">
+            <div class="master-order-info-box" style="margin: 10px 0; background-color: #ffffff; border: 4px solid #000000; border-radius: 8px; text-align: center; width: 120px; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 15px; color: #000000; font-family: Arial, sans-serif; outline: 4px solid #000000;">
                 <div class="master-order-label" style="font-size: 16px; font-weight: bold; color: #000000; line-height: 1; margin: 0;">
                     <?php echo __('MASTER ORDER', 'neve-child'); ?>
                 </div>
@@ -121,7 +150,7 @@ class PackingSlipCustomizer
             </div>
         <?php elseif (!empty($student_number)): ?>
             <!-- 🎯 ESTUDIANTES CON NÚMERO -->
-            <div class="student-info-box with-student-number" style="margin: 20px 0; background-color: #ffffff; border: 4px solid #000000; border-radius: 8px; text-align: center; width: 120px; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 15px; color: #000000; font-family: Arial, sans-serif; outline: 4px solid #000000;">
+            <div class="student-info-box with-student-number" style="margin: 10px 0; background-color: #ffffff; border: 4px solid #000000; border-radius: 8px; text-align: center; width: 120px; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 15px; color: #000000; font-family: Arial, sans-serif; outline: 4px solid #000000;">
                 <div class="student-number" style="font-size: 28px; font-weight: bold; color: #000000; line-height: 1; margin: 0;">
                     <?php echo sprintf(__('Nº %s', 'neve-child'), esc_html($student_number)); ?>
                 </div>
@@ -154,9 +183,20 @@ class PackingSlipCustomizer
             return $address;
         }
 
-        // No modificar para pedidos maestros
+        // Para pedidos maestros, mostrar solo el nombre del colegio en company
         if ($order->get_meta('_is_master_order') === 'yes') {
-            return $address;
+            $school_name = $this->getSchoolName($order);
+            return [
+                'first_name' => '',
+                'last_name' => '',
+                'company' => $school_name, // Mantener nombre del colegio
+                'address_1' => '',
+                'address_2' => '',
+                'city' => '',
+                'state' => '',
+                'postcode' => '',
+                'country' => '',
+            ];
         }
 
         $student_name_parts = $this->getStudentNameParts($order);
@@ -199,9 +239,20 @@ class PackingSlipCustomizer
             return $address;
         }
 
-        // No modificar para pedidos maestros
+        // Para pedidos maestros, mostrar solo el nombre del colegio en company
         if ($order->get_meta('_is_master_order') === 'yes') {
-            return $address;
+            $school_name = $this->getSchoolName($order);
+            return [
+                'first_name' => '',
+                'last_name' => '',
+                'company' => $school_name, // Mantener nombre del colegio
+                'address_1' => '',
+                'address_2' => '',
+                'city' => '',
+                'state' => '',
+                'postcode' => '',
+                'country' => '',
+            ];
         }
 
         $student_name_parts = $this->getStudentNameParts($order);
@@ -507,6 +558,294 @@ class PackingSlipCustomizer
         }
 
         return null;
+    }
+
+    /**
+     * Ocultar método de pago en PDFs (solo para packing slips)
+     * 
+     * @param string $payment_method_title Título del método de pago
+     * @param \WC_Order $order Objeto de pedido
+     * @return string Título modificado (vacío para ocultar)
+     */
+    public function hidePaymentMethodInPdf($payment_method_title, $order = null): string
+    {
+        // Solo aplicar durante la generación de PDFs
+        if (!$this->isGeneratingPdf()) {
+            return $payment_method_title;
+        }
+
+        // CRÍTICO: Solo aplicar a packing slips, NO a facturas ni otros documentos
+        if (!$this->isGeneratingPackingSlip()) {
+            return $payment_method_title;
+        }
+
+        // Ocultar método de pago devolviendo string vacío
+        return '';
+    }
+
+    /**
+     * Ocultar sección completa del método de pago usando CSS
+     * 
+     * @param string $document_type Tipo de documento
+     * @param \WC_Order $order Objeto de pedido
+     * @return void
+     */
+    public function hidePaymentMethodSection(string $document_type, \WC_Order $order): void
+    {
+        // Solo aplicar a packing slips
+        if ($document_type !== 'packing-slip') {
+            return;
+        }
+
+        // Agregar CSS inline para ocultar elementos relacionados con método de pago
+        ?>
+        <style>
+        /* Ocultar método de pago en packing slips */
+        .payment-method,
+        .payment_method,
+        .order-payment-method,
+        .wc-order-payment-method,
+        .payment-info,
+        .payment_info,
+        tr.payment-method,
+        tr.payment_method,
+        .document-notes .payment,
+        .order-data .payment,
+        .order-meta .payment,
+        td.payment-method,
+        td.payment_method,
+        th.payment-method,
+        th.payment_method,
+        .wpo-wcpdf-payment-method,
+        .wcpdf-payment-method {
+            display: none !important;
+        }
+        
+        /* También ocultar filas de tabla que contengan "Payment" o "Pago" */
+        tr:has(.payment-method),
+        tr:has(.payment_method),
+        tr:contains("Payment Method"),
+        tr:contains("Método de pago"),
+        tr:contains("Payment"),
+        tr:contains("Pago") {
+            display: none !important;
+        }
+        </style>
+        <?php
+    }
+
+    /**
+     * Ocultar dirección de la empresa en packing slips
+     * 
+     * @param string $shop_address Dirección de la empresa
+     * @param object $document Objeto de documento
+     * @return string Dirección modificada (vacía para ocultar)
+     */
+    public function hideCompanyAddressInPackingSlip($shop_address, $document = null): string
+    {
+        // Solo aplicar durante la generación de PDFs
+        if (!$this->isGeneratingPdf()) {
+            return $shop_address;
+        }
+
+        // CRÍTICO: Solo aplicar a packing slips, NO a facturas ni otros documentos
+        if (!$this->isGeneratingPackingSlip()) {
+            return $shop_address;
+        }
+
+        // Verificar si es un packing slip por el tipo de documento
+        if ($document && is_object($document) && method_exists($document, 'get_type')) {
+            if ($document->get_type() !== 'packing-slip') {
+                return $shop_address;
+            }
+        }
+
+        // Ocultar dirección de la empresa devolviendo string vacío
+        return '';
+    }
+
+    /**
+     * Ocultar sección completa de la dirección de empresa usando CSS
+     * 
+     * @param string $document_type Tipo de documento
+     * @param \WC_Order $order Objeto de pedido
+     * @return void
+     */
+    public function hideCompanyAddressSection(string $document_type, \WC_Order $order): void
+    {
+        // Solo aplicar a packing slips
+        if ($document_type !== 'packing-slip') {
+            return;
+        }
+
+        // Agregar CSS inline para ocultar elementos relacionados con dirección de empresa
+        ?>
+        <style>
+        /* Ocultar dirección de empresa en packing slips */
+        .shop-address,
+        .company-address,
+        .shop-details .address,
+        .document-header .address,
+        .wpo-wcpdf-shop-address,
+        .wcpdf-shop-address,
+        .shop-info .address,
+        .header-shop-address,
+        .pdf-shop-address,
+        .from-address,
+        .sender-address,
+        .company-info .address,
+        .shop-details address,
+        .document-header address,
+        .header address,
+        .shop-name + address,
+        .shop-name + .address,
+        address.shop-address,
+        .wpo_wcpdf_shop_address,
+        .wcpdf_shop_address,
+        .document-header-left address,
+        .document-header-right address,
+        .shop-column address,
+        .from-column address {
+            display: none !important;
+        }
+        
+        /* También ocultar elementos que contengan dirección específica */
+        .document-header p:has(address),
+        .shop-details p:has(address),
+        .header p:has(address) {
+            display: none !important;
+        }
+        </style>
+        <?php
+    }
+
+    /**
+     * Optimizar tabla de productos para que entren 36 elementos
+     */
+    public function optimizeTableForSpace(string $document_type, \WC_Order $order): void
+    {
+        // Solo aplicar a packing slips
+        if ($document_type !== 'packing-slip') {
+            return;
+        }
+
+        ?>
+        <style>
+        /* Optimización de tabla para que entren 36 elementos */
+        .order-details table,
+        .order-items table,
+        #order_details_table,
+        table.order-details,
+        table.order-items {
+            font-size: 8px !important;
+        }
+        
+        .order-details table td,
+        .order-details table th,
+        .order-items table td,
+        .order-items table th,
+        #order_details_table td,
+        #order_details_table th,
+        table.order-details td,
+        table.order-details th,
+        table.order-items td,
+        table.order-items th {
+            font-size: 10px !important;
+            padding: 0px 1px !important;
+            line-height: 1 !important;
+            margin: 0 !important;
+            border-spacing: 0 !important;
+        }
+        
+        .order-details tbody tr,
+        .order-items tbody tr,
+        #order_details_table tbody tr,
+        table.order-details tbody tr,
+        table.order-items tbody tr {
+            height: auto !important;
+            min-height: 10px !important;
+            margin: 0 !important;
+            padding: 0 !important;
+        }
+        
+        .order-details table,
+        .order-items table,
+        #order_details_table,
+        table.order-details,
+        table.order-items {
+            border-spacing: 0 !important;
+            border-collapse: collapse !important;
+            margin: 0 !important;
+        }
+        </style>
+        <?php
+    }
+
+    /**
+     * Quitar footer RGPD de los packing slips
+     */
+    public function hideRgpdFooterInPackingSlip($footer, $document = null): string
+    {
+        // Solo aplicar a packing slips
+        if ($document && method_exists($document, 'get_type') && $document->get_type() === 'packing-slip') {
+            return '';
+        }
+        
+        return $footer;
+    }
+
+    /**
+     * Eliminar completamente cualquier contenido de footer en packing slips
+     */
+    public function removeFooterContent(string $document_type, \WC_Order $order): void
+    {
+        // Solo aplicar a packing slips
+        if ($document_type !== 'packing-slip') {
+            return;
+        }
+
+        // Agregar CSS para eliminar completamente cualquier footer o contenido extra
+        ?>
+        <style>
+        /* Eliminar completamente cualquier footer, pie de página o contenido RGPD */
+        .document-footer,
+        .footer,
+        .wpo-wcpdf-footer,
+        .wcpdf-footer,
+        .footer-content,
+        .document-notes,
+        .footer-notes,
+        .rgpd-footer,
+        .privacy-footer,
+        .terms-footer,
+        .legal-footer,
+        .page-break,
+        .break-page,
+        .wpo_wcpdf_footer,
+        .wcpdf_footer {
+            display: none !important;
+            height: 0 !important;
+            margin: 0 !important;
+            padding: 0 !important;
+            visibility: hidden !important;
+        }
+        
+        /* Eliminar saltos de página automáticos */
+        @page {
+            margin-bottom: 0 !important;
+        }
+        
+        /* Asegurar que no hay espacio extra al final */
+        body, html {
+            margin-bottom: 0 !important;
+            padding-bottom: 0 !important;
+        }
+        </style>
+        <?php
+        
+        // COMENTADO: Puede interferir con la generación del PDF
+        // ob_start();
+        // ob_clean();
     }
 
 

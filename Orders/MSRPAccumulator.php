@@ -3,17 +3,7 @@
  * MSRP Accumulator for tracking user lifetime MSRP values
  * 
  * Tracks and accumulates the total MSRP (Manufacturer's Suggested Retail Price) 
- * value for each user across all their orders, including ha        $this->subtractUserMSRPTotal($user_id, $refund_msrp_total);
-        
-        // También necesitamos restar del total de ventas el monto del reembolso
-        $this->updateUserIncomingAfterRefund($user_id, $refund);
-
-        // Store refund MSRP total for reference
-        $refund->update_meta_data(self::ORDER_MSRP_TOTAL_META, $refund_msrp_total);
-        $refund->save();
-        
-        // DESACTIVAR bandera - reembolso completado
-        self::$processing_refund = false;s.
+ * value for each user across all their orders, including refunds.
  * 
  * @package SchoolManagement\Orders
  * @since 1.0.0
@@ -71,7 +61,7 @@ class MSRPAccumulator
     public function initHooks(): void
     {
         // ⚠️ RESET ALL MSRP DATA - Execute once then comment out
-        $this->resetAllUserMSRPData();
+        // $this->resetAllUserMSRPData();
         
         // ⚠️ COMMENT THE LINE ABOVE AFTER RUNNING ONCE ⚠️
         
@@ -125,33 +115,33 @@ class MSRPAccumulator
         // 🎯 PROTECCIÓN: Verificar si ya fue procesado para evitar doble suma
         $already_processed = $order->get_meta('_msrp_processed');
         if ($already_processed === 'yes') {
-            // Log el intento de duplicación para auditoría
-            $this->logDuplicateAttempt($user_id, $order_id, $order->get_status());
             return;
         }
 
-        $order_msrp_total = $this->calculateOrderMSRPTotal($order);
+        // 🎯 CALCULAR MSRP NETO: Descontar refunds existentes
+        $gross_msrp_total = $this->calculateOrderMSRPTotal($order);
+        $refunded_msrp_total = $this->calculateRefundedMSRP($order);
+        $net_msrp_total = max(0, $gross_msrp_total - $refunded_msrp_total);
         
-        if ($order_msrp_total <= 0) {
+        if ($net_msrp_total <= 0) {
+            // Si no hay MSRP neto, marcar como procesado pero no sumar nada
+            $order->update_meta_data('_msrp_processed', 'yes');
+            $order->update_meta_data(self::ORDER_MSRP_TOTAL_META, 0);
+            $order->update_meta_data('_msrp_gross_total', $gross_msrp_total);
+            $order->update_meta_data('_msrp_refunded_total', $refunded_msrp_total);
+            $order->save();
             return;
         }
 
-        // 🎯 CÁLCULO CORRECTO: Solo usar MSRP base, los refunds se procesan por separado en su propio hook
-        $final_msrp_total = $order_msrp_total;
-
-        // 🔍 DEBUG: Log del cálculo para auditoría
-        $this->logOrderMSRPCalculation($user_id, $order_id, $order_msrp_total, $final_msrp_total, $order->get_refunds());
-
-        // Save order MSRP total in order meta
-        $order->update_meta_data(self::ORDER_MSRP_TOTAL_META, $final_msrp_total);
+        // Save order MSRP total in order meta (guardar tanto neto como bruto para referencia)
+        $order->update_meta_data(self::ORDER_MSRP_TOTAL_META, $net_msrp_total);
         $order->update_meta_data('_msrp_processed', 'yes');
+        $order->update_meta_data('_msrp_gross_total', $gross_msrp_total);
+        $order->update_meta_data('_msrp_refunded_total', $refunded_msrp_total);
         $order->save();
 
-        // Add to user's accumulated total
-        $this->addToUserMSRPTotal($user_id, $final_msrp_total, $order_id, 'order_completed');
-
-        // 🎯 PROCESAR REFUNDS EXISTENTES: Si el pedido tiene refunds que no se procesaron antes
-        $this->processExistingRefundsForOrder($order, $user_id);
+        // Add to user's accumulated total (solo el MSRP neto)
+        $this->addToUserMSRPTotal($user_id, $net_msrp_total, $order_id, 'order_completed');
     }
 
     /**
@@ -223,10 +213,16 @@ class MSRPAccumulator
             return;
         }
 
-        // 🎯 PROTECCIÓN: No procesar refunds si el pedido no está validado
-        // Solo procesar refunds de pedidos completed/reviewed
-        $order_status = $order->get_status();
-        if (!in_array($order_status, ['completed', 'reviewed'])) {
+        // 🎯 NUEVA LÓGICA: Solo procesar refunds de pedidos YA validados
+        $order_processed = $order->get_meta('_msrp_processed');
+        if ($order_processed !== 'yes') {
+            self::$processing_refund = false;
+            return;
+        }
+
+        // 🎯 VERIFICAR: ¿Este refund ya fue procesado?
+        $refund_processed = $refund->get_meta('_msrp_refund_processed');
+        if ($refund_processed === 'yes') {
             self::$processing_refund = false;
             return;
         }
@@ -237,8 +233,6 @@ class MSRPAccumulator
         // For refunds, the MSRP total should be positive (we'll subtract it)
         $refund_msrp_total = abs($refund_msrp_total);
 
-
-        
         if ($refund_msrp_total <= 0) {
             self::$processing_refund = false; // Restaurar bandera
             return;
@@ -250,7 +244,7 @@ class MSRPAccumulator
         // También necesitamos restar del total de ventas el monto del reembolso
         $this->updateUserIncomingAfterRefund($user_id, $refund);
 
-        // Store refund MSRP total for reference and mark as processed
+        // Store refund MSRP total for reference y marcar como procesado
         $refund->update_meta_data(self::ORDER_MSRP_TOTAL_META, $refund_msrp_total);
         $refund->update_meta_data('_msrp_refund_processed', 'yes');
         $refund->save();
@@ -283,6 +277,52 @@ class MSRPAccumulator
         }
         
         return (float) $normalized_price;
+    }
+
+    /**
+     * Calculate total MSRP of all refunds for an order
+     * 
+     * @param \WC_Order $order Order object
+     * @return float Total refunded MSRP
+     */
+    private function calculateRefundedMSRP(\WC_Order $order): float
+    {
+        $total_refunded_msrp = 0.0;
+        $refunds = $order->get_refunds();
+        
+        foreach ($refunds as $refund) {
+            foreach ($refund->get_items() as $item_id => $item) {
+                if (!$item instanceof \WC_Order_Item_Product) {
+                    continue;
+                }
+
+                $product_id = $item->get_product_id();
+                $variation_id = $item->get_variation_id();
+                $raw_quantity = $item->get_quantity();
+                $quantity = abs($raw_quantity); // Quantity en refunds es negativa, convertir a positiva
+                
+                // Use variation ID if available, otherwise product ID
+                $product_id_for_acf = $variation_id ? $variation_id : $product_id;
+                
+                // Get MSRP price from ACF field
+                $msrp_price_raw = get_field(self::PRODUCT_MSRP_FIELD, $product_id_for_acf);
+                $msrp_price = $this->normalizeMSRPPrice($msrp_price_raw);
+                
+                if ($msrp_price === false && $variation_id) {
+                    // Try to get from parent product if variation doesn't have it
+                    $msrp_price_raw = get_field(self::PRODUCT_MSRP_FIELD, $product_id);
+                    $msrp_price = $this->normalizeMSRPPrice($msrp_price_raw);
+                }
+                
+                if ($msrp_price === false || $msrp_price <= 0) {
+                    continue;
+                }
+                
+                $item_refunded_msrp = (float) $msrp_price * $quantity;
+                $total_refunded_msrp += $item_refunded_msrp;
+            }
+        }
+        return $total_refunded_msrp;
     }
 
     /**
@@ -338,8 +378,6 @@ class MSRPAccumulator
         return $total_msrp;
     }
 
-
-
     /**
      * Add amount to user's MSRP total
      * 
@@ -358,8 +396,6 @@ class MSRPAccumulator
         
         // Update incoming total (Total Sales - MSRP)
         $this->updateUserIncomingTotal($user_id);
-        
-        $this->logMSRPChange($user_id, $amount, $new_total, $related_id, $reason, 'add');
     }
 
     /**
@@ -383,166 +419,9 @@ class MSRPAccumulator
         if ($reason !== 'refund') {
             $this->updateUserIncomingTotal($user_id);
         }
-        
-        $this->logMSRPChange($user_id, $amount, $new_total, $related_id, $reason, 'subtract');
     }
 
-    /**
-     * Log MSRP changes for audit purposes
-     * 
-     * @param int $user_id User ID
-     * @param float $amount Amount changed
-     * @param float $new_total New total after change
-     * @param int $related_id Related order/refund ID
-     * @param string $reason Reason for change
-     * @param string $operation Operation type (add/subtract)
-     * @return void
-     */
-    private function logMSRPChange(int $user_id, float $amount, float $new_total, int $related_id, string $reason, string $operation): void
-    {
-        $log_entry = [
-            'timestamp' => current_time('mysql'),
-            'user_id' => $user_id,
-            'amount' => $amount,
-            'new_total' => $new_total,
-            'related_id' => $related_id,
-            'reason' => $reason,
-            'operation' => $operation
-        ];
-        
-        // Get existing log
-        $msrp_log = get_user_meta($user_id, '_msrp_change_log', true);
-        if (!is_array($msrp_log)) {
-            $msrp_log = [];
-        }
-        
-        // Add new entry
-        $msrp_log[] = $log_entry;
-        
-        // Keep only last 100 entries to avoid bloating
-        if (count($msrp_log) > 100) {
-            $msrp_log = array_slice($msrp_log, -100);
-        }
-        
-        update_user_meta($user_id, '_msrp_change_log', $msrp_log);
-    }
 
-    /**
-     * Log duplicate MSRP processing attempts
-     * 
-     * @param int $user_id User ID
-     * @param int $order_id Order ID
-     * @param string $status Current order status
-     * @return void
-     */
-    private function logDuplicateAttempt(int $user_id, int $order_id, string $status): void
-    {
-        $log_entry = [
-            'timestamp' => current_time('mysql'),
-            'user_id' => $user_id,
-            'order_id' => $order_id,
-            'status' => $status,
-            'message' => 'Duplicate MSRP processing attempt blocked',
-            'type' => 'duplicate_attempt'
-        ];
-        
-        // Get existing duplicate log
-        $duplicate_log = get_user_meta($user_id, '_msrp_duplicate_log', true);
-        if (!is_array($duplicate_log)) {
-            $duplicate_log = [];
-        }
-        
-        // Add new entry
-        $duplicate_log[] = $log_entry;
-        
-        // Keep only last 50 entries
-        if (count($duplicate_log) > 50) {
-            $duplicate_log = array_slice($duplicate_log, -50);
-        }
-        
-        update_user_meta($user_id, '_msrp_duplicate_log', $duplicate_log);
-        
-        // También loguearlo en el log regular para referencia
-        $this->logMSRPChange($user_id, 0, $this->getUserMSRPTotal($user_id), $order_id, 'duplicate_blocked', 'skip');
-    }
-
-    /**
-     * Log detailed order MSRP calculation for debugging
-     * 
-     * @param int $user_id User ID
-     * @param int $order_id Order ID
-     * @param float $base_msrp Base MSRP before refunds
-     * @param float $final_msrp Final MSRP after refunds
-     * @param array $refunds Array of refunds
-     * @return void
-     */
-    private function logOrderMSRPCalculation(int $user_id, int $order_id, float $base_msrp, float $final_msrp, array $refunds): void
-    {
-        $refund_details = [];
-        $total_refund_msrp = 0.0;
-        
-        foreach ($refunds as $refund) {
-            $refund_msrp = $this->calculateOrderMSRPTotal($refund);
-            $refund_details[] = [
-                'refund_id' => $refund->get_id(),
-                'refund_msrp' => abs($refund_msrp)
-            ];
-            $total_refund_msrp += abs($refund_msrp);
-        }
-        
-        $log_entry = [
-            'timestamp' => current_time('mysql'),
-            'user_id' => $user_id,
-            'order_id' => $order_id,
-            'base_msrp' => $base_msrp,
-            'final_msrp' => $final_msrp,
-            'total_refund_msrp' => $total_refund_msrp,
-            'refund_count' => count($refunds),
-            'refund_details' => $refund_details,
-            'calculation' => "{$base_msrp} - {$total_refund_msrp} = {$final_msrp}",
-            'type' => 'order_msrp_calculation'
-        ];
-        
-        // Get existing calculation log
-        $calc_log = get_user_meta($user_id, '_msrp_calculation_log', true);
-        if (!is_array($calc_log)) {
-            $calc_log = [];
-        }
-        
-        // Add new entry
-        $calc_log[] = $log_entry;
-        
-        // Keep only last 50 entries
-        if (count($calc_log) > 50) {
-            $calc_log = array_slice($calc_log, -50);
-        }
-        
-        update_user_meta($user_id, '_msrp_calculation_log', $calc_log);
-    }
-
-    /**
-     * Get user's MSRP calculation log
-     * 
-     * @param int $user_id User ID
-     * @param int $limit Number of entries to return (default: 25)
-     * @return array Calculation log
-     */
-    public function getUserCalculationLog(int $user_id, int $limit = 25): array
-    {
-        $log = get_user_meta($user_id, '_msrp_calculation_log', true);
-        if (!is_array($log)) {
-            return [];
-        }
-        
-        // Return most recent entries first
-        $log = array_reverse($log);
-        
-        if ($limit > 0) {
-            return array_slice($log, 0, $limit);
-        }
-        
-        return $log;
-    }
 
     /**
      * Get user's current MSRP total
@@ -555,98 +434,7 @@ class MSRPAccumulator
         return (float) get_user_meta($user_id, self::USER_MSRP_TOTAL_META, true);
     }
 
-    /**
-     * Get user's MSRP change log
-     * 
-     * @param int $user_id User ID
-     * @param int $limit Number of entries to return (default: 50)
-     * @return array Change log
-     */
-    public function getUserMSRPLog(int $user_id, int $limit = 50): array
-    {
-        $log = get_user_meta($user_id, '_msrp_change_log', true);
-        if (!is_array($log)) {
-            return [];
-        }
-        
-        // Return most recent entries first
-        $log = array_reverse($log);
-        
-        if ($limit > 0) {
-            return array_slice($log, 0, $limit);
-        }
-        
-        return $log;
-    }
 
-    /**
-     * Get user's MSRP duplicate attempts log
-     * 
-     * @param int $user_id User ID
-     * @param int $limit Number of entries to return (default: 25)
-     * @return array Duplicate attempts log
-     */
-    public function getUserDuplicateLog(int $user_id, int $limit = 25): array
-    {
-        $log = get_user_meta($user_id, '_msrp_duplicate_log', true);
-        if (!is_array($log)) {
-            return [];
-        }
-        
-        // Return most recent entries first
-        $log = array_reverse($log);
-        
-        if ($limit > 0) {
-            return array_slice($log, 0, $limit);
-        }
-        
-        return $log;
-    }
-
-    /**
-     * Process existing refunds for an order that just became validated
-     * This handles refunds that were created while the order was in processing status
-     * 
-     * @param \WC_Order $order Order object
-     * @param int $user_id User ID
-     * @return void
-     */
-    private function processExistingRefundsForOrder(\WC_Order $order, int $user_id): void
-    {
-        $refunds = $order->get_refunds();
-        
-        if (empty($refunds)) {
-            return;
-        }
-        
-        foreach ($refunds as $refund) {
-            $refund_id = $refund->get_id();
-            
-            // Verificar si este refund ya fue procesado
-            $refund_processed = $refund->get_meta('_msrp_refund_processed');
-            if ($refund_processed === 'yes') {
-                continue; // Ya fue procesado
-            }
-            
-            // Calcular MSRP del refund
-            $refund_msrp = $this->calculateOrderMSRPTotal($refund);
-            $refund_msrp = abs($refund_msrp);
-            
-            if ($refund_msrp <= 0) {
-                continue;
-            }
-            
-            // Restar del total del usuario
-            $this->subtractFromUserMSRPTotal($user_id, $refund_msrp, $refund_id, 'existing_refund_processed');
-            
-            // Marcar como procesado
-            $refund->update_meta_data('_msrp_refund_processed', 'yes');
-            $refund->save();
-            
-            // Log para auditoría
-            $this->logMSRPChange($user_id, $refund_msrp, $this->getUserMSRPTotal($user_id), $refund_id, 'existing_refund_processed', 'subtract');
-        }
-    }
 
     /**
      * Recalculate user's MSRP total from all orders (for correction purposes)
@@ -745,35 +533,22 @@ class MSRPAccumulator
         }
 
         $total = $this->getUserMSRPTotal($user_id);
-        $log = $this->getUserMSRPLog($user_id, 10);
-        $duplicates = $this->getUserDuplicateLog($user_id, 5);
-        
-        $calculations = $this->getUserCalculationLog($user_id, 5);
         
         wp_send_json_success([
             'user_id' => $user_id,
-            'total' => $total,
-            'recent_changes' => $log,
-            'duplicate_attempts' => $duplicates,
-            'duplicate_count' => count($duplicates),
-            'calculation_details' => $calculations,
-            'calculation_count' => count($calculations)
+            'total' => $total
         ]);
     }
 
     /**
-     * Update user's incoming total (MSRP - Total Sales)
+     * Update user's incoming total (calculado pedido por pedido: suma de diferencias MSRP - precio venta)
      * 
      * @param int $user_id User ID
      * @return void
      */
     private function updateUserIncomingTotal(int $user_id): void
     {
-        // Obtener el total MSRP acumulado
-        $msrp_total = (float) get_user_meta($user_id, self::USER_MSRP_TOTAL_META, true);
-        
-        // Obtener el total de ventas del usuario (de WooCommerce)
-        $total_sales = 0.0;
+        $total_incoming = 0.0;
         
         // Obtener todos los pedidos completados del usuario
         $orders = wc_get_orders([
@@ -784,14 +559,29 @@ class MSRPAccumulator
         ]);
         
         foreach ($orders as $order) {
-            $total_sales += (float) $order->get_total();
+            // Calcular MSRP NETO del pedido (bruto - refunds)
+            $gross_msrp = $this->calculateOrderMSRPTotal($order);
+            $refunded_msrp = $this->calculateRefundedMSRP($order);
+            $order_msrp = max(0, $gross_msrp - $refunded_msrp);
+            
+            // Calcular precio de venta neto (total - reembolsos)
+            $order_sales = (float) $order->get_total();
+            $refunds = $order->get_refunds();
+            foreach ($refunds as $refund) {
+                $order_sales -= abs((float) $refund->get_total());
+            }
+            
+            // Calcular incoming de este pedido (MSRP NETO - precio venta)
+            $order_incoming = $order_msrp - $order_sales;
+            
+            // Solo sumar si es positivo (ganancia)
+            if ($order_incoming > 0) {
+                $total_incoming += $order_incoming;
+            }
         }
         
-        // Calcular incoming: MSRP - Total Sales (diferencia/ganancia)
-        $incoming_total = max(0, $msrp_total - $total_sales); // No permitir valores negativos
-        
         // Guardar el valor calculado
-        update_user_meta($user_id, self::USER_INCOMING_TOTAL_META, $incoming_total);
+        update_user_meta($user_id, self::USER_INCOMING_TOTAL_META, $total_incoming);
     }
 
     /**
@@ -873,15 +663,17 @@ class MSRPAccumulator
             wp_send_json_error('Invalid user ID');
         }
 
-        // Recalcular el incoming total
+        // Recalcular el incoming total con la nueva lógica
         $this->updateUserIncomingTotal($user_id);
         
         // Obtener el nuevo valor
         $incoming_total = (float) get_user_meta($user_id, self::USER_INCOMING_TOTAL_META, true);
-        $msrp_total = (float) get_user_meta($user_id, self::USER_MSRP_TOTAL_META, true);
         
-        // Calcular total sales para mostrar en respuesta
+        // Calcular desglose para mostrar en respuesta
+        $total_msrp = 0.0;
         $total_sales = 0.0;
+        $order_details = [];
+        
         $orders = wc_get_orders([
             'customer_id' => $user_id,
             'status' => ['completed', 'reviewed'],
@@ -890,15 +682,41 @@ class MSRPAccumulator
         ]);
         
         foreach ($orders as $order) {
-            $total_sales += (float) $order->get_total();
+            // Calcular MSRP NETO (bruto - refunds)
+            $gross_msrp = $this->calculateOrderMSRPTotal($order);
+            $refunded_msrp = $this->calculateRefundedMSRP($order);
+            $order_msrp = max(0, $gross_msrp - $refunded_msrp);
+            
+            $order_sales = (float) $order->get_total();
+            
+            $refunds = $order->get_refunds();
+            foreach ($refunds as $refund) {
+                $order_sales -= abs((float) $refund->get_total());
+            }
+            
+            $order_incoming = max(0, $order_msrp - $order_sales);
+            
+            $total_msrp += $order_msrp;
+            $total_sales += $order_sales;
+            
+            $order_details[] = [
+                'order_id' => $order->get_id(),
+                'msrp_gross' => $gross_msrp,
+                'msrp_refunded' => $refunded_msrp,
+                'msrp_net' => $order_msrp,
+                'sales' => $order_sales,
+                'incoming' => $order_incoming
+            ];
         }
         
         wp_send_json_success([
             'user_id' => $user_id,
+            'total_msrp' => $total_msrp,
             'total_sales' => $total_sales,
-            'msrp_total' => $msrp_total,
             'incoming_total' => $incoming_total,
-            'calculation' => "€{$msrp_total} - €{$total_sales} = €{$incoming_total}"
+            'order_count' => count($orders),
+            'calculation_method' => 'Suma de (MSRP - Precio Venta) por pedido',
+            'order_details' => array_slice($order_details, -5) // Últimos 5 pedidos
         ]);
     }
 

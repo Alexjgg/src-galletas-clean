@@ -88,6 +88,16 @@ class VendorPDFManager
      */
     public function applyVendorNumbering($formatted_number, $document, $document_type = null, $order = null)
     {
+        // 🐛 DEBUG TEMPORAL - Log de parámetros de entrada SIEMPRE
+        error_log("🔍 DEBUG applyVendorNumbering LLAMADO");
+        error_log("🔍 DEBUG formatted_number: " . ($formatted_number ?: 'EMPTY'));
+        error_log("🔍 DEBUG document_type param: " . ($document_type ?: 'NULL'));
+        error_log("🔍 DEBUG document class: " . (is_object($document) ? get_class($document) : 'NOT_OBJECT'));
+        
+        // Log específico para orden 1507
+        if (is_object($document) && method_exists($document, 'order_id') && $document->order_id == 1507) {
+            error_log("🔍 DEBUG *** ORDEN 1507 DETECTADA ***");
+        }
         if (!is_object($document)) {
             return $formatted_number;
         }
@@ -109,6 +119,10 @@ class VendorPDFManager
             $order_id = is_numeric($order) ? $order : (is_object($order) && method_exists($order, 'get_id') ? $order->get_id() : null);
         }
         
+        // 🐛 DEBUG TEMPORAL - Log específico para orden 1507
+        error_log("🔍 DEBUG order_id obtenido: " . ($order_id ?: 'NULL'));
+        error_log("🔍 DEBUG order param: " . (is_object($order) ? get_class($order) : ($order ?: 'NULL')));
+        
         if (!$order_id) {
             return $formatted_number;
         }
@@ -124,9 +138,20 @@ class VendorPDFManager
             // NO aplicar numeración personalizada, pero SÍ procesar Tax ID
             // (Este es el caso de las facturas normales que ya tienen número)
             
-            // 🔧 FIX: Obtener el número correcto del meta en lugar de confiar en $formatted_number
+            // 🔧 FIX HPOS: Obtener el número correcto usando WooCommerce nativo
             $normalized_document_type = str_replace('-', '_', $document_type);
-            $existing_meta = get_post_meta($order_id, "_wcpdf_{$normalized_document_type}_number", true);
+            $meta_key = "_wcpdf_{$normalized_document_type}_number";
+            $order_obj = wc_get_order($order_id);
+            $existing_meta = $order_obj ? $order_obj->get_meta($meta_key) : '';
+            
+            // 🐛 DEBUG TEMPORAL - Para orden 1507
+            if ($order_id == 1507) {
+                error_log("🔍 DEBUG Order 1507 - document_type: {$document_type}");
+                error_log("🔍 DEBUG Order 1507 - normalized_document_type: {$normalized_document_type}");
+                error_log("🔍 DEBUG Order 1507 - meta_key: {$meta_key}");
+                error_log("🔍 DEBUG Order 1507 - existing_meta: " . ($existing_meta ?: 'EMPTY'));
+                error_log("🔍 DEBUG Order 1507 - formatted_number: " . ($formatted_number ?: 'EMPTY'));
+            }
             
             if (!empty($existing_meta)) {
                 return $existing_meta; // Devolver el número guardado (ej: "00001-2025")
@@ -749,7 +774,7 @@ class VendorPDFManager
     }
 
     /**
-     * Obtener order_id de un documento
+     * Obtener order_id de un documento - VERSIÓN MEJORADA PARA HPOS
      */
     private function getOrderIdFromDocument($document)
     {
@@ -757,12 +782,56 @@ class VendorPDFManager
             return null;
         }
         
+        // Método 1: get_order_id()
         if (method_exists($document, 'get_order_id')) {
-            return $document->get_order_id();
+            $order_id = $document->get_order_id();
+            if ($order_id) {
+                return $order_id;
+            }
         }
         
+        // Método 2: propiedad order_id
         if (property_exists($document, 'order_id')) {
             return $document->order_id;
+        }
+        
+        // Método 3: get_order() y luego get_id()
+        if (method_exists($document, 'get_order')) {
+            $order = $document->get_order();
+            if ($order && method_exists($order, 'get_id')) {
+                return $order->get_id();
+            }
+        }
+        
+        // Método 4: Buscar en propiedades del objeto DocumentNumber
+        if (property_exists($document, 'order')) {
+            $order = $document->order;
+            if ($order && method_exists($order, 'get_id')) {
+                return $order->get_id();
+            }
+        }
+        
+        // Método 5: Debugging - inspeccionar el objeto para encontrar order_id
+        $class_name = get_class($document);
+        if (strpos($class_name, 'DocumentNumber') !== false) {
+            // Para DocumentNumber, intentar diferentes propiedades
+            $reflection = new \ReflectionClass($document);
+            $properties = $reflection->getProperties();
+            
+            foreach ($properties as $property) {
+                $property->setAccessible(true);
+                $value = $property->getValue($document);
+                
+                // Si encontramos una propiedad que parece ser un order
+                if (is_object($value) && method_exists($value, 'get_id')) {
+                    return $value->get_id();
+                }
+                
+                // Si encontramos directamente un order_id numérico
+                if ($property->getName() === 'order_id' && is_numeric($value)) {
+                    return intval($value);
+                }
+            }
         }
         
         return null;
@@ -955,7 +1024,24 @@ class VendorPDFManager
         if (strpos($document_type, 'invoice') !== false) {
             // 🔧 FIX: Convertir guiones a guiones bajos en el meta key
             $normalized_document_type = str_replace('-', '_', $document_type);
-            $existing_meta = get_post_meta($order_id, "_wcpdf_{$normalized_document_type}_number", true);
+            $meta_key = "_wcpdf_{$normalized_document_type}_number";
+            
+            // 🚀 HPOS Compatible: Usar WooCommerce nativo en lugar de get_post_meta
+            $order = wc_get_order($order_id);
+            $existing_meta = $order ? $order->get_meta($meta_key) : '';
+            
+            // 🐛 DEBUG TEMPORAL - Para orden 1507 o si order_id es null
+            if ($order_id == 1507 || !$order_id) {
+                error_log("🔍 DEBUG shouldApplyCustomNumbering - Order {$order_id} [HPOS COMPATIBLE]");
+                error_log("🔍 DEBUG order_id recibido: " . ($order_id ?: 'NULL'));
+                error_log("🔍 DEBUG order object: " . ($order ? get_class($order) : 'NULL'));
+                error_log("🔍 DEBUG document_type: {$document_type}");
+                error_log("🔍 DEBUG normalized_document_type: {$normalized_document_type}");
+                error_log("🔍 DEBUG meta_key: {$meta_key}");
+                error_log("🔍 DEBUG existing_meta (WC): " . ($existing_meta ?: 'EMPTY'));
+                error_log("🔍 DEBUG existing_meta (legacy): " . (get_post_meta($order_id, $meta_key, true) ?: 'EMPTY'));
+                error_log("🔍 DEBUG empty(existing_meta): " . (empty($existing_meta) ? 'TRUE' : 'FALSE'));
+            }
             
             $result = empty($existing_meta);
             
