@@ -200,25 +200,20 @@ class PackingSlipCustomizer
         }
 
         $student_name_parts = $this->getStudentNameParts($order);
-        if (!$student_name_parts) {
-            return $address; // Si no hay datos del alumno, usar dirección original
+        
+        // Sustituir nombre y apellidos por los del alumno, vaciar el resto
+        if ($student_name_parts) {
+            $address['first_name'] = $student_name_parts['first_name'];
+            $address['last_name'] = $student_name_parts['last_name'];
         }
-
-        // Obtener nombre del colegio
-        $school_name = $this->getSchoolName($order);
-
-        // Modificar para mostrar solo nombre del alumno y colegio, sin direcciones
-        $address = [
-            'first_name' => $student_name_parts['first_name'],
-            'last_name' => $student_name_parts['last_name'],
-            'company' => $school_name, // Mostrar nombre del colegio en empresa
-            'address_1' => '', // Ocultar dirección
-            'address_2' => '', // Ocultar dirección 2
-            'city' => '', // Ocultar ciudad
-            'state' => '', // Ocultar estado/provincia
-            'postcode' => '', // Ocultar código postal
-            'country' => '', // Ocultar país
-        ];
+        
+        // Vaciar todos los campos de direcciones
+        $address['address_1'] = '';
+        $address['address_2'] = '';
+        $address['city'] = '';
+        $address['state'] = '';
+        $address['postcode'] = '';
+        $address['country'] = '';
 
         return $address;
     }
@@ -256,25 +251,20 @@ class PackingSlipCustomizer
         }
 
         $student_name_parts = $this->getStudentNameParts($order);
-        if (!$student_name_parts) {
-            return $address; // Si no hay datos del alumno, usar dirección original
+        
+        // Sustituir nombre y apellidos por los del alumno, vaciar el resto
+        if ($student_name_parts) {
+            $address['first_name'] = $student_name_parts['first_name'];
+            $address['last_name'] = $student_name_parts['last_name'];
         }
-
-        // Obtener nombre del colegio
-        $school_name = $this->getSchoolName($order);
-
-        // Modificar para mostrar solo nombre del alumno y colegio, sin direcciones
-        $address = [
-            'first_name' => $student_name_parts['first_name'],
-            'last_name' => $student_name_parts['last_name'],
-            'company' => $school_name, // Mostrar nombre del colegio en empresa
-            'address_1' => '', // Ocultar dirección
-            'address_2' => '', // Ocultar dirección 2
-            'city' => '', // Ocultar ciudad
-            'state' => '', // Ocultar estado/provincia
-            'postcode' => '', // Ocultar código postal
-            'country' => '', // Ocultar país
-        ];
+        
+        // Vaciar todos los campos de direcciones
+        $address['address_1'] = '';
+        $address['address_2'] = '';
+        $address['city'] = '';
+        $address['state'] = '';
+        $address['postcode'] = '';
+        $address['country'] = '';
 
         return $address;
     }

@@ -389,6 +389,11 @@ class PaymentHandler
      */
     public function enablePaymentForPayLater(?bool $needs_payment, \WC_Order $order): bool
     {
+        // VERIFICACIÓN CRÍTICA: Pedidos cancelados NO pueden ser repagados
+        if ($order->get_status() === 'cancelled') {
+            return false;
+        }
+        
         // Si viene null, convertir a false como valor por defecto
         $needs_payment = $needs_payment ?? false;
         
@@ -605,6 +610,11 @@ class PaymentHandler
      */
     public function allowDeferredRepayment(bool $needs_payment, \WC_Order $order): bool
     {
+        // VERIFICACIÓN CRÍTICA: Pedidos cancelados NO pueden ser repagados
+        if ($order->get_status() === 'cancelled') {
+            return false;
+        }
+        
         // Aplicar a pedidos diferidos Y a pedidos Redsys que pueden ser diferidos
         $payment_method = $order->get_payment_method();
         
@@ -820,6 +830,11 @@ class PaymentHandler
      */
     public function allowRetryAfterFailure(bool $needs_payment, \WC_Order $order): bool
     {
+        // VERIFICACIÓN CRÍTICA: Pedidos cancelados NO pueden ser repagados
+        if ($order->get_status() === 'cancelled') {
+            return false;
+        }
+        
         $payment_method = $order->get_payment_method();
         
         // LÓGICA AMPLIADA: Aplicar a:
@@ -921,6 +936,11 @@ class PaymentHandler
      */
     public function detectAndFixCancelledPayments(bool $needs_payment, \WC_Order $order): bool
     {
+        // VERIFICACIÓN CRÍTICA: Pedidos cancelados NO pueden ser repagados
+        if ($order->get_status() === 'cancelled') {
+            return false;
+        }
+        
         $payment_method = $order->get_payment_method();
         
         // Aplicar a pedidos de pago diferido O a pedidos Redsys que tienen fechas de pago diferido

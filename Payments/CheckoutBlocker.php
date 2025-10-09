@@ -347,6 +347,11 @@ class CheckoutBlocker
      */
     private function orderNeedsPaymentAdvanced(\WC_Order $order): bool
     {
+        // VERIFICACIÓN CRÍTICA: Pedidos cancelados NO necesitan pago
+        if ($order->get_status() === 'cancelled') {
+            return false;
+        }
+        
         $payment_method = $order->get_payment_method();
         
         // Usar lógica unificada: verificar solo indicadores confiables de pago

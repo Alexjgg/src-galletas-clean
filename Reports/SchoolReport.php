@@ -26,9 +26,9 @@ class SchoolReport
         'wc-mast-warehs' => 'mast-warehs',
         'wc-mast-prepared' => 'mast-prepared',
         'wc-mast-complete' => 'mast-complete',
+        'wc-processing' => 'processing',
         
         // Estados de órdenes individuales específicos
-        'wc-processing' => 'processing',
         'wc-reviewed' => 'reviewed',
         'wc-warehouse' => 'warehouse',
         'wc-prepared' => 'prepared',
@@ -60,9 +60,9 @@ class SchoolReport
             'wc-mast-warehs' => __('Master Warehouse', 'neve-child'),
             'wc-mast-prepared' => __('Master Prepared', 'neve-child'),
             'wc-mast-complete' => __('Master Complete', 'neve-child'),
+            'wc-processing' => __('Processing', 'neve-child'),
             
             // Estados de órdenes individuales específicos
-            'wc-processing' => __('Processing', 'neve-child'),
             'wc-reviewed' => __('Reviewed', 'neve-child'),
             'wc-warehouse' => __('Warehouse', 'neve-child'),
             'wc-prepared' => __('Prepared', 'neve-child'),
@@ -412,21 +412,147 @@ class SchoolReport
 
         // Obtener estados a usar en la consulta
         $query_statuses = $this->getOrderStatusesForQuery($order_statuses);
+        
+        // LÓGICA CORRECTA: wc-reviewed es el individual de wc-master-order (evitar duplicación)
+        $master_order_statuses = ['wc-master-order', 'wc-mast-warehs', 'wc-mast-prepared', 'wc-mast-complete'];
+        $neutral_statuses = ['wc-processing']; // Estados que incluyen TODO sin filtro master/individual
+        // CRÍTICO: wc-reviewed es el INDIVIDUAL correspondiente a wc-master-order (MISMO pedido)
+        
+        $has_master_statuses = false;
+        $has_individual_statuses = false;
+        
+        foreach ($query_statuses as $status) {
+            if (in_array($status, $master_order_statuses)) {
+                $has_master_statuses = true;
+            } elseif (!in_array($status, $neutral_statuses)) {
+                $has_individual_statuses = true;
+            }
+        }
+        
+        // LÓGICA ANTI-DUPLICACIÓN: wc-reviewed + wc-master-order son EL MISMO PEDIDO
+        $master_statuses = array_intersect($query_statuses, $master_order_statuses);
+        $individual_statuses = array_diff($query_statuses, array_merge($master_order_statuses, $neutral_statuses));
+        $neutral_statuses_filtered = array_intersect($query_statuses, $neutral_statuses);
+        
+        // VERIFICAR: Detectar TODOS los pares master/individual que causan duplicación
+        $status_pairs = [
+            'wc-master-order' => 'wc-reviewed',
+            'wc-mast-warehs' => 'wc-warehouse', 
+            'wc-mast-prepared' => 'wc-prepared',
+            'wc-mast-complete' => 'wc-completed'
+        ];
+        
+        $detected_pairs = [];
+        foreach ($status_pairs as $master => $individual) {
+            if (in_array($master, $query_statuses) && in_array($individual, $query_statuses)) {
+                $detected_pairs[$master] = $individual;
+            }
+        }
+        
+        $status_parts = [];
+        
+        // PARTE 1: Estados neutrales siempre se incluyen
+        if (!empty($neutral_statuses_filtered)) {
+            $status_parts[] = "o.status IN ('" . implode("','", $neutral_statuses_filtered) . "')";
+        }
+        
+        // PARTE 2: Lógica anti-duplicación para TODOS los pares master/individual
+        if (!empty($detected_pairs)) {
+            // HAY DUPLICACIÓN: Aplicar prioridad MASTER para todos los pares detectados
+            $conflicted_individuals = array_values($detected_pairs); // ['wc-reviewed', 'wc-warehouse', etc.]
+            
+            // Agregar estados master (que tienen prioridad sobre sus individuales)
+            $masters_with_pairs = array_keys($detected_pairs);
+            $masters_in_query = array_intersect($master_statuses, $masters_with_pairs);
+            if (!empty($masters_in_query)) {
+                $status_parts[] = "(o.status IN ('" . implode("','", $masters_in_query) . "') 
+                                   AND EXISTS (
+                                       SELECT 1 FROM {$wpdb->prefix}wc_orders_meta imo 
+                                       WHERE imo.order_id = o.id 
+                                       AND imo.meta_key = '_is_master_order' 
+                                       AND imo.meta_value = 'yes'
+                                   ))";
+            }
+            
+            // Agregar otros estados master (no en conflicto)
+            $other_masters = array_diff($master_statuses, $masters_with_pairs);
+            if (!empty($other_masters)) {
+                $status_parts[] = "(o.status IN ('" . implode("','", $other_masters) . "') 
+                                   AND EXISTS (
+                                       SELECT 1 FROM {$wpdb->prefix}wc_orders_meta imo 
+                                       WHERE imo.order_id = o.id 
+                                       AND imo.meta_key = '_is_master_order' 
+                                       AND imo.meta_value = 'yes'
+                                   ))";
+            }
+            
+            // Agregar estados individuales (excluyendo los que tienen conflicto con masters)
+            $safe_individuals = array_diff($individual_statuses, $conflicted_individuals);
+            if (!empty($safe_individuals)) {
+                $status_parts[] = "(o.status IN ('" . implode("','", $safe_individuals) . "')
+                                   AND NOT EXISTS (
+                                       SELECT 1 FROM {$wpdb->prefix}wc_orders_meta imo 
+                                       WHERE imo.order_id = o.id 
+                                       AND imo.meta_key = '_is_master_order' 
+                                       AND imo.meta_value = 'yes'
+                                   ))";
+            }
+        } else {
+            // NO hay duplicación: usar lógica normal
+            
+            // Estados master
+            if (!empty($master_statuses)) {
+                $status_parts[] = "(o.status IN ('" . implode("','", $master_statuses) . "') 
+                                   AND EXISTS (
+                                       SELECT 1 FROM {$wpdb->prefix}wc_orders_meta imo 
+                                       WHERE imo.order_id = o.id 
+                                       AND imo.meta_key = '_is_master_order' 
+                                       AND imo.meta_value = 'yes'
+                                   ))";
+            }
+            
+            // Estados individuales
+            if (!empty($individual_statuses)) {
+                $status_parts[] = "(o.status IN ('" . implode("','", $individual_statuses) . "')
+                                   AND NOT EXISTS (
+                                       SELECT 1 FROM {$wpdb->prefix}wc_orders_meta imo 
+                                       WHERE imo.order_id = o.id 
+                                       AND imo.meta_key = '_is_master_order' 
+                                       AND imo.meta_value = 'yes'
+                                   ))";
+            }
+        }
+        
+        // COMBINAR todas las condiciones
+        if (!empty($status_parts)) {
+            $status_condition = "AND (" . implode(" OR ", $status_parts) . ")";
+        } else {
+            $status_condition = "";
+        }
 
-        // Primera consulta: obtener escuelas con órdenes
+        // Primera consulta: obtener escuelas con órdenes ORDENADAS POR ZONA Y ALFABÉTICAMENTE
+        // CRÍTICO: Usar la misma lógica anti-duplicación que en products_query
         $schools_query = "
             SELECT 
                 om.meta_value as school_id,
                 p.post_title as school_name,
-                COUNT(DISTINCT o.id) as order_count
+                COUNT(DISTINCT o.id) as order_count,
+                COALESCE(t.name, 'Sin zona asignada') as zone_name
             FROM {$wpdb->prefix}wc_orders o
             INNER JOIN {$wpdb->prefix}wc_orders_meta om ON o.id = om.order_id
             LEFT JOIN {$wpdb->posts} p ON om.meta_value = p.ID
+            LEFT JOIN {$wpdb->term_relationships} tr ON p.ID = tr.object_id
+            LEFT JOIN {$wpdb->term_taxonomy} tt ON tr.term_taxonomy_id = tt.term_taxonomy_id 
+                AND tt.taxonomy = 'coo_zone'
+            LEFT JOIN {$wpdb->terms} t ON tt.term_id = t.term_id
             WHERE om.meta_key = %s
-            AND o.status IN ('" . implode("','", $query_statuses) . "')
+            {$status_condition}
             {$additional_where}
             GROUP BY om.meta_value
-            ORDER BY p.post_title ASC
+            ORDER BY 
+                CASE WHEN t.name IS NULL THEN 1 ELSE 0 END,
+                t.name ASC,
+                p.post_title ASC
         ";
 
         $schools_results = $wpdb->get_results($wpdb->prepare($schools_query, ...$prepare_values));
@@ -443,13 +569,15 @@ class SchoolReport
             $school_name = $school_row->school_name ?: "Escuela #{$school_id_current}";
             
             // Consulta para obtener productos de esta escuela específica
+            // CRÍTICO: Usar COUNT(DISTINCT oi.order_item_id) para evitar duplicar items cuando hay múltiples metas
             $products_query = "
                 SELECT 
                     oim.meta_value as product_id,
                     pr.post_title as product_name,
                     SUM(CAST(oiqty.meta_value AS UNSIGNED)) as total_quantity,
                     COUNT(DISTINCT o.id) as order_count,
-                    SUM(CAST(oitotal.meta_value AS DECIMAL(10,2)) + CAST(COALESCE(oitax.meta_value, 0) AS DECIMAL(10,2))) as total_amount
+                    SUM(CAST(oitotal.meta_value AS DECIMAL(10,2)) + CAST(COALESCE(oitax.meta_value, 0) AS DECIMAL(10,2))) as total_amount,
+                    COUNT(DISTINCT oi.order_item_id) as unique_items_count
                 FROM {$wpdb->prefix}wc_orders o
                 INNER JOIN {$wpdb->prefix}wc_orders_meta om ON o.id = om.order_id
                 INNER JOIN {$wpdb->prefix}woocommerce_order_items oi ON o.id = oi.order_id
@@ -460,13 +588,13 @@ class SchoolReport
                 INNER JOIN {$wpdb->posts} pr ON oim.meta_value = pr.ID
                 WHERE om.meta_key = %s
                 AND om.meta_value = %d
-                AND o.status IN ('" . implode("','", $query_statuses) . "')
+                {$status_condition}
                 AND oi.order_item_type = 'line_item'
                 AND oim.meta_key = '_product_id'
                 AND oiqty.meta_key = '_qty'
                 AND oitotal.meta_key = '_line_total'
                 AND pr.post_type = 'product'
-                GROUP BY oim.meta_value
+                GROUP BY oim.meta_value, pr.post_title
                 ORDER BY total_quantity DESC
             ";
             
@@ -517,6 +645,73 @@ class SchoolReport
     }
 
     /**
+     * Agrupar escuelas por zonas manteniendo la ordenación
+     */
+    private function groupSchoolsByZones(array $schools_data): array
+    {
+        $zones_data = [];
+        
+        // Como las escuelas ya vienen ordenadas por zona y alfabéticamente del SQL,
+        // solo necesitamos agruparlas manteniendo ese orden
+        foreach ($schools_data as $school_id => $school) {
+            $zones = $school['zones'] ?? [];
+            
+            if (empty($zones)) {
+                // Escuelas sin zona asignada
+                $zone_slug = 'sin-zona';
+                $zone_name = 'Sin zona asignada';
+                
+                if (!isset($zones_data[$zone_slug])) {
+                    $zones_data[$zone_slug] = [
+                        'zone_info' => [
+                            'id' => 0,
+                            'name' => $zone_name,
+                            'slug' => $zone_slug
+                        ],
+                        'schools' => []
+                    ];
+                }
+                
+                $zones_data[$zone_slug]['schools'][$school_id] = $school;
+            } else {
+                // Escuelas con zona(s) asignada(s)
+                // Si una escuela tiene múltiples zonas, la ponemos en la primera
+                $zone = $zones[0]; // Usar la primera zona
+                $zone_slug = $zone['slug'] ?? sanitize_title($zone['name']);
+                
+                if (!isset($zones_data[$zone_slug])) {
+                    $zones_data[$zone_slug] = [
+                        'zone_info' => [
+                            'id' => $zone['id'],
+                            'name' => $zone['name'],
+                            'slug' => $zone_slug
+                        ],
+                        'schools' => []
+                    ];
+                }
+                
+                $zones_data[$zone_slug]['schools'][$school_id] = $school;
+            }
+        }
+        
+        // Las zonas ya deberían estar ordenadas porque las escuelas vienen ordenadas por zona del SQL
+        // Pero por seguridad, vamos a ordenar las zonas alfabéticamente
+        uksort($zones_data, function($a, $b) use ($zones_data) {
+            // "Sin zona asignada" siempre va al final
+            if ($a === 'sin-zona') return 1;
+            if ($b === 'sin-zona') return -1;
+            
+            // El resto alfabéticamente por nombre de zona
+            $zone_a = $zones_data[$a]['zone_info']['name'];
+            $zone_b = $zones_data[$b]['zone_info']['name'];
+            
+            return strcasecmp($zone_a, $zone_b);
+        });
+        
+        return $zones_data;
+    }
+
+    /**
      * Obtener resumen estadístico general del informe de escuelas
      */
     public function getOverallStats($school_ids = null, $zone_ids = null, $order_statuses = null): array
@@ -534,19 +729,128 @@ class SchoolReport
             $order_statuses = array_keys(self::DEFAULT_ORDER_STATUSES);
         }
 
-        // Construir condiciones WHERE
+        // LÓGICA CORRECTA: wc-reviewed es el individual de wc-master-order (evitar duplicación)
+        $master_order_statuses = ['wc-master-order', 'wc-mast-warehs', 'wc-mast-prepared', 'wc-mast-complete'];
+        $neutral_statuses = ['wc-processing']; // Estados que incluyen TODO sin filtro master/individual
+        // CRÍTICO: wc-reviewed es el INDIVIDUAL correspondiente a wc-master-order (MISMO pedido)
+        
+        $has_master_statuses = false;
+        $has_individual_statuses = false;
+        
+        foreach ($order_statuses as $status) {
+            if (in_array($status, $master_order_statuses)) {
+                $has_master_statuses = true;
+            } elseif (!in_array($status, $neutral_statuses)) {
+                $has_individual_statuses = true;
+            }
+        }
+        
+        // LÓGICA ANTI-DUPLICACIÓN: wc-reviewed + wc-master-order son EL MISMO PEDIDO (igual que getSchoolProductStats)
+        $neutral_statuses_filtered = array_intersect($order_statuses, $neutral_statuses);
+        $master_statuses = array_intersect($order_statuses, $master_order_statuses);
+        $individual_statuses = array_diff($order_statuses, array_merge($master_order_statuses, $neutral_statuses));
+        
+        // VERIFICAR: Detectar TODOS los pares master/individual que causan duplicación
+        $status_pairs = [
+            'wc-master-order' => 'wc-reviewed',
+            'wc-mast-warehs' => 'wc-warehouse', 
+            'wc-mast-prepared' => 'wc-prepared',
+            'wc-mast-complete' => 'wc-completed'
+        ];
+        
+        $detected_pairs = [];
+        foreach ($status_pairs as $master => $individual) {
+            if (in_array($master, $order_statuses) && in_array($individual, $order_statuses)) {
+                $detected_pairs[$master] = $individual;
+            }
+        }
+        
+        $status_parts = [];
+        
+        // PARTE 1: Estados neutrales siempre se incluyen
+        if (!empty($neutral_statuses_filtered)) {
+            $status_parts[] = "o.status IN ('" . implode("','", $neutral_statuses_filtered) . "')";
+        }
+        
+        // PARTE 2: Lógica anti-duplicación para TODOS los pares master/individual
+        if (!empty($detected_pairs)) {
+            // HAY DUPLICACIÓN: Aplicar prioridad MASTER para todos los pares detectados
+            $conflicted_individuals = array_values($detected_pairs); // ['wc-reviewed', 'wc-warehouse', etc.]
+            
+            // Agregar estados master (que tienen prioridad sobre sus individuales)
+            $masters_with_pairs = array_keys($detected_pairs);
+            $masters_in_query = array_intersect($master_statuses, $masters_with_pairs);
+            if (!empty($masters_in_query)) {
+                $status_parts[] = "(o.status IN ('" . implode("','", $masters_in_query) . "') 
+                                   AND EXISTS (
+                                       SELECT 1 FROM {$wpdb->prefix}wc_orders_meta imo 
+                                       WHERE imo.order_id = o.id 
+                                       AND imo.meta_key = '_is_master_order' 
+                                       AND imo.meta_value = 'yes'
+                                   ))";
+            }
+            
+            // Agregar otros estados master (no en conflicto)
+            $other_masters = array_diff($master_statuses, $masters_with_pairs);
+            if (!empty($other_masters)) {
+                $status_parts[] = "(o.status IN ('" . implode("','", $other_masters) . "') 
+                                   AND EXISTS (
+                                       SELECT 1 FROM {$wpdb->prefix}wc_orders_meta imo 
+                                       WHERE imo.order_id = o.id 
+                                       AND imo.meta_key = '_is_master_order' 
+                                       AND imo.meta_value = 'yes'
+                                   ))";
+            }
+            
+            // Agregar estados individuales (excluyendo los que tienen conflicto con masters)
+            $safe_individuals = array_diff($individual_statuses, $conflicted_individuals);
+            if (!empty($safe_individuals)) {
+                $status_parts[] = "(o.status IN ('" . implode("','", $safe_individuals) . "')
+                                   AND NOT EXISTS (
+                                       SELECT 1 FROM {$wpdb->prefix}wc_orders_meta imo 
+                                       WHERE imo.order_id = o.id 
+                                       AND imo.meta_key = '_is_master_order' 
+                                       AND imo.meta_value = 'yes'
+                                   ))";
+            }
+        } else {
+            // NO hay duplicación: usar lógica normal
+            if (!empty($master_statuses)) {
+                $status_parts[] = "(o.status IN ('" . implode("','", $master_statuses) . "') 
+                                   AND EXISTS (
+                                       SELECT 1 FROM {$wpdb->prefix}wc_orders_meta imo 
+                                       WHERE imo.order_id = o.id 
+                                       AND imo.meta_key = '_is_master_order' 
+                                       AND imo.meta_value = 'yes'
+                                   ))";
+            }
+            
+            if (!empty($individual_statuses)) {
+                $status_parts[] = "(o.status IN ('" . implode("','", $individual_statuses) . "')
+                                   AND NOT EXISTS (
+                                       SELECT 1 FROM {$wpdb->prefix}wc_orders_meta imo 
+                                       WHERE imo.order_id = o.id 
+                                       AND imo.meta_key = '_is_master_order' 
+                                       AND imo.meta_value = 'yes'
+                                   ))";
+            }
+        }
+        
+        // COMBINAR todas las condiciones
+        if (!empty($status_parts)) {
+            $status_condition = "AND (" . implode(" OR ", $status_parts) . ")";
+        } else {
+            $status_condition = "";
+        }
+
+        // Construir condiciones WHERE adicionales
         $where_conditions = [];
         $where_params = [];
-
-        // Filtro por estados de órdenes
-        $placeholders = str_repeat(',%s', count($order_statuses) - 1);
-        $where_conditions[] = "o.status IN (%s{$placeholders})";
-        $where_params = array_merge($where_params, $order_statuses);
 
         // Filtro por escuelas específicas
         if (!empty($school_ids)) {
             $school_placeholders = str_repeat(',%d', count($school_ids) - 1);
-            $where_conditions[] = "om.meta_value IN (%d{$school_placeholders})";
+            $where_conditions[] = "AND om.meta_value IN (%d{$school_placeholders})";
             $where_params = array_merge($where_params, $school_ids);
         }
 
@@ -558,13 +862,14 @@ class SchoolReport
                 AND szm.meta_key = 'school_zone'
             ";
             $zone_placeholders = str_repeat(',%d', count($zone_ids) - 1);
-            $where_conditions[] = "szm.meta_value IN (%d{$zone_placeholders})";
+            $where_conditions[] = "AND szm.meta_value IN (%d{$zone_placeholders})";
             $where_params = array_merge($where_params, $zone_ids);
         }
 
-        $where_clause = implode(' AND ', $where_conditions);
+        $additional_where = implode(' ', $where_conditions);
 
         // Consulta para estadísticas generales enfocadas en escuelas
+        // CRÍTICO: Evitar duplicación al unir múltiples tablas de metadatos
         $stats_query = "
             SELECT 
                 COUNT(DISTINCT om.meta_value) as total_schools,
@@ -572,12 +877,13 @@ class SchoolReport
                 SUM(CAST(oiqty.meta_value AS UNSIGNED)) as total_quantity,
                 SUM(CAST(oitotal.meta_value AS DECIMAL(10,2)) + CAST(COALESCE(oitax.meta_value, 0) AS DECIMAL(10,2))) as total_amount,
                 COUNT(DISTINCT oim.meta_value) as total_products,
+                COUNT(DISTINCT oi.order_item_id) as total_line_items,
                 AVG(school_totals.school_quantity) as avg_quantity_per_school,
                 AVG(school_totals.school_orders) as avg_orders_per_school
             FROM {$wpdb->prefix}wc_orders o
             INNER JOIN {$wpdb->prefix}wc_orders_meta om ON o.id = om.order_id AND om.meta_key = %s
             {$zone_join}
-            INNER JOIN {$wpdb->prefix}woocommerce_order_items oi ON o.id = oi.order_id
+            INNER JOIN {$wpdb->prefix}woocommerce_order_items oi ON o.id = oi.order_id AND oi.order_item_type = 'line_item'
             INNER JOIN {$wpdb->prefix}woocommerce_order_itemmeta oim ON oi.order_item_id = oim.order_item_id AND oim.meta_key = '_product_id'
             INNER JOIN {$wpdb->prefix}woocommerce_order_itemmeta oiqty ON oi.order_item_id = oiqty.order_item_id AND oiqty.meta_key = '_qty'
             INNER JOIN {$wpdb->prefix}woocommerce_order_itemmeta oitotal ON oi.order_item_id = oitotal.order_item_id AND oitotal.meta_key = '_line_total'
@@ -590,17 +896,18 @@ class SchoolReport
                     COUNT(DISTINCT o2.id) as school_orders
                 FROM {$wpdb->prefix}wc_orders o2
                 INNER JOIN {$wpdb->prefix}wc_orders_meta om2 ON o2.id = om2.order_id AND om2.meta_key = %s
-                INNER JOIN {$wpdb->prefix}woocommerce_order_items oi2 ON o2.id = oi2.order_id
+                INNER JOIN {$wpdb->prefix}woocommerce_order_items oi2 ON o2.id = oi2.order_id AND oi2.order_item_type = 'line_item'
                 INNER JOIN {$wpdb->prefix}woocommerce_order_itemmeta oiqty2 ON oi2.order_item_id = oiqty2.order_item_id AND oiqty2.meta_key = '_qty'
-                WHERE o2.status IN (%s{$placeholders})
+                WHERE 1=1 " . $status_condition . "
                 GROUP BY om2.meta_value
             ) school_totals ON school_totals.school_id = om.meta_value
-            WHERE {$where_clause}
+            WHERE om.meta_key = %s
+            " . $status_condition . "
+            {$additional_where}
         ";
 
         // Preparar parámetros completos
-        $placeholders = str_repeat(',%s', count($order_statuses) - 1);
-        $params = array_merge([$school_meta_key, $school_meta_key], $order_statuses, $where_params);
+        $params = array_merge([$school_meta_key, $school_meta_key, $school_meta_key], $where_params);
         $stats = $wpdb->get_row($wpdb->prepare($stats_query, $params));
 
         if (!$stats) {
@@ -674,8 +981,27 @@ class SchoolReport
                 'message' => 'No se encontraron datos de escuelas'
             ]);
         } else {
+            // Agrupar escuelas por zonas para mantener la ordenación correcta
+            $schools_by_zones = $this->groupSchoolsByZones($data);
+            
+            // Crear array de escuelas ordenado por zona para el frontend
+            // Importante: usar array numérico para mantener el orden
+            $schools_ordered = [];
+            foreach ($schools_by_zones as $zone_data) {
+                foreach ($zone_data['schools'] as $school_id => $school) {
+                    $schools_ordered[] = $school; // Array numérico mantiene el orden
+                }
+            }
+            
+            // Debug temporal - ver order de escuelas
+            error_log('Schools ordered count: ' . count($schools_ordered));
+            if (!empty($schools_ordered)) {
+                error_log('First 3 schools: ' . implode(', ', array_slice(array_column($schools_ordered, 'school_name'), 0, 3)));
+            }
+            
             wp_send_json_success([
-                'schools' => $data,
+                'by_zones' => $schools_by_zones,
+                'schools' => $schools_ordered, // Escuelas ordenadas por zona
                 'overall_stats' => $overall_stats,
                 'order_statuses' => $order_statuses // Pasar los estados para generar URLs en frontend
             ]);
