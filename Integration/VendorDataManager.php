@@ -38,6 +38,9 @@ class VendorDataManager
         
         // Hook SOLO para AEAT/Factupress - VendorPDFManager maneja todo lo de PDFs
         add_filter('option_factupress-settings-fields', [$this, 'interceptFactupressSettings'], 1);
+        
+        // 🎯 HOOK SIMPLE: Interceptar NIF para QRs de VeriFactu
+        add_filter('verifactu_qr_nif', [$this, 'changeNifForQR'], 10, 4);
     }
 
     /**
@@ -596,6 +599,129 @@ class VendorDataManager
         // Si todos los refunds ya tienen número, usar el más reciente
         $latest_refund = reset($refunds);
         return $latest_refund->get_id();
+    }
+
+    /**
+     * 🎯 INTERCEPTAR SETTINGS DE FACTUPRESS PARA QRs EN QRColumn
+     * Detecta cuando QRColumn está generando QRs y sustituye el NIF por el del vendor
+     */
+    public function interceptFactupressSettingsForQR($settings)
+    {
+        // 🔍 DETECTAR SI ESTAMOS EN QRColumn generando QRs
+        if (!$this->isQRColumnContext()) {
+            return $settings;
+        }
+
+        // 🎯 OBTENER ORDER_ID del contexto actual
+        $order_id = $this->detectOrderIdFromQRContext();
+        if (!$order_id) {
+            return $settings;
+        }
+
+        // 🔍 OBTENER DATOS DEL VENDOR para este pedido
+        $vendor_data = $this->getVendorDataFromOrder($order_id);
+        if (!$vendor_data || empty($vendor_data['tax_id'])) {
+            return $settings;
+        }
+
+        // 🎯 SUSTITUIR ÚNICAMENTE EL NIF del vendor
+        $settings['nif'] = $vendor_data['tax_id'];
+        
+        return $settings;
+    }
+
+    /**
+     * 🔍 DETECTAR SI ESTAMOS EN EL CONTEXTO DE QRColumn
+     */
+    private function isQRColumnContext()
+    {
+        // Verificar si estamos en el admin de WooCommerce orders
+        if (!is_admin()) {
+            return false;
+        }
+
+        // Verificar si es la página de pedidos de WooCommerce
+        $page = $_GET['page'] ?? '';
+        $post_type = $_GET['post_type'] ?? '';
+        
+        $is_woo_orders_page = ($page === 'wc-orders');
+        $is_shop_order_page = ($post_type === 'shop_order' && strpos($_SERVER['REQUEST_URI'], 'edit.php') !== false);
+        
+        if (!$is_woo_orders_page && !$is_shop_order_page) {
+            return false;
+        }
+
+        // Verificar stack trace para confirmar que viene de QRColumn
+        $backtrace = debug_backtrace(DEBUG_BACKTRACE_IGNORE_ARGS, 10);
+        
+        foreach ($backtrace as $trace) {
+            if (isset($trace['class']) && 
+                (strpos($trace['class'], 'QRColumn') !== false || 
+                 strpos($trace['class'], 'Factupress\\Verifactu\\Orders\\QRColumn') !== false)) {
+                return true;
+            }
+            
+            // También verificar si el archivo contiene QRColumn
+            if (isset($trace['file']) && strpos($trace['file'], 'QRColumn.php') !== false) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * 🎯 DETECTAR ORDER_ID desde el contexto de QRColumn
+     */
+    private function detectOrderIdFromQRContext()
+    {
+        // Verificar si hay un order_id en el contexto global que QRColumn esté procesando
+        global $current_qr_order_id;
+        if ($current_qr_order_id) {
+            return $current_qr_order_id;
+        }
+
+        // Verificar en el backtrace si podemos encontrar el post_id/order_id
+        $backtrace = debug_backtrace(DEBUG_BACKTRACE_PROVIDE_OBJECT, 15);
+        
+        foreach ($backtrace as $trace) {
+            // Buscar en los argumentos de la función renderQRColumn
+            if (isset($trace['function']) && $trace['function'] === 'renderQRColumn' && 
+                isset($trace['args']) && count($trace['args']) >= 2) {
+                $post_id = $trace['args'][1]; // Segundo parámetro es post_id
+                if (is_numeric($post_id)) {
+                    return (int) $post_id;
+                }
+            }
+            
+            // Buscar variables locales que contengan order o post_id
+            if (isset($trace['object'])) {
+                $vars = get_object_vars($trace['object']);
+                if (isset($vars['post_id'])) {
+                    return (int) $vars['post_id'];
+                }
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * 🎯 CAMBIAR NIF PARA QRs DE VERIFACTU SEGÚN EL VENDOR DEL PEDIDO
+     * Método simple que recibe el order_id y devuelve el NIF correcto
+     */
+    public function changeNifForQR($nif, $order_id, $order, $refund = null)
+    {
+        // Obtener datos del vendor para este pedido
+        $vendor_data = $this->getVendorDataFromOrder($order_id);
+        
+        if (!$vendor_data || empty($vendor_data['tax_id'])) {
+            // Si no hay vendor o NIF, devolver el original
+            return $nif;
+        }
+        
+        // Devolver el NIF del vendor
+        return $vendor_data['tax_id'];
     }
 
 

@@ -70,9 +70,7 @@ class VendorFieldValidator
      * Control whether invoice numbers are editable or read-only
      * Set to false to disable editing, true to enable editing
      */
-    private const INVOICE_NUMBERS_EDITABLE = false;
-
-    /**
+    private const INVOICE_NUMBERS_EDITABLE = true;    /**
      * Constructor
      */
     public function __construct()
@@ -1008,6 +1006,7 @@ class VendorFieldValidator
     /**
      * Auto-manage invoice numbers for both regular and simplified invoices
      * Automatically generates the next sequential number if not set
+     * ONLY executes when INVOICE_NUMBERS_EDITABLE is false
      * 
      * @param int $post_id
      */
@@ -1016,6 +1015,11 @@ class VendorFieldValidator
         // Only process vendor posts
         if (!$this->isVendorPost($post_id)) {
             return;
+        }
+
+        // CRITICAL: Only auto-manage when numbers are NOT editable
+        if (self::INVOICE_NUMBERS_EDITABLE) {
+            return; // Numbers are editable by user, do not auto-manage
         }
 
         // Get or generate regular invoice number

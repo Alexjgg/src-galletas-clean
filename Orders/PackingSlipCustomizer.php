@@ -112,8 +112,9 @@ class PackingSlipCustomizer
     /**
      * Mostrar información del estudiante después del área de direcciones
      * Se ejecuta después de las direcciones de envío, ideal para mostrar las cajas de información
+     * Acepta tanto WC_Order como WC_Order_Refund
      */
-    public function displayStudentInfoAfterAddresses(string $document_type, \WC_Order $order): void
+    public function displayStudentInfoAfterAddresses(string $document_type, $order): void
     {
         // Solo aplicar a packing slips
         if ($document_type !== 'packing-slip') {
@@ -121,7 +122,7 @@ class PackingSlipCustomizer
         }
 
         // Asegurar que tenemos un objeto order válido
-        if (!$order instanceof \WC_Order) {
+        if (!($order instanceof \WC_Order || $order instanceof \WC_Order_Refund)) {
             return;
         }
 
@@ -170,8 +171,9 @@ class PackingSlipCustomizer
     /**
      * Personalizar dirección de facturación para mostrar solo datos del alumno
      * SOLO APLICA A PACKING SLIPS (albaranes), NO a facturas ni otros documentos
+     * Acepta tanto WC_Order como WC_Order_Refund
      */
-    public function customizeOrderBillingAddress(array $address, \WC_Order $order): array
+    public function customizeOrderBillingAddress(array $address, $order): array
     {
         // Solo aplicar durante la generación de PDFs
         if (!$this->isGeneratingPdf()) {
@@ -221,8 +223,9 @@ class PackingSlipCustomizer
     /**
      * Personalizar dirección de envío para mostrar solo datos del alumno
      * SOLO APLICA A PACKING SLIPS (albaranes), NO a facturas ni otros documentos
+     * Acepta tanto WC_Order como WC_Order_Refund
      */
-    public function customizeOrderShippingAddress(array $address, \WC_Order $order): array
+    public function customizeOrderShippingAddress(array $address, $order): array
     {
         // Solo aplicar durante la generación de PDFs
         if (!$this->isGeneratingPdf()) {
@@ -322,8 +325,9 @@ class PackingSlipCustomizer
 
     /**
      * Obtener las partes del nombre del alumno desde los campos ACF
+     * @param \WC_Order|\WC_Order_Refund $order El pedido o reembolso
      */
-    private function getStudentNameParts(\WC_Order $order): ?array
+    private function getStudentNameParts($order): ?array
     {
         $customer_user_id = $order->get_customer_id();
         
@@ -372,8 +376,9 @@ class PackingSlipCustomizer
 
     /**
      * Obtener el nombre del colegio desde los meta del pedido
+     * @param \WC_Order|\WC_Order_Refund $order El pedido o reembolso
      */
-    private function getSchoolName(\WC_Order $order): string
+    private function getSchoolName($order): string
     {
         // Intentar obtener el nombre del colegio desde los meta del pedido
         $school_name = $order->get_meta('_school_name');
@@ -404,8 +409,9 @@ class PackingSlipCustomizer
 
     /**
      * Obtener el número del alumno desde los campos ACF
+     * @param \WC_Order|\WC_Order_Refund $order El pedido o reembolso
      */
-    private function getStudentNumber(\WC_Order $order): string
+    private function getStudentNumber($order): string
     {
         $customer_user_id = $order->get_customer_id();
         
@@ -429,8 +435,9 @@ class PackingSlipCustomizer
 
     /**
      * Calcular el total de cajas (cantidad total de productos) del pedido
+     * @param \WC_Order|\WC_Order_Refund $order El pedido o reembolso
      */
-    private function getTotalBoxes(\WC_Order $order): int
+    private function getTotalBoxes($order): int
     {
         $total_boxes = 0;
         foreach ($order->get_items() as $item) {
@@ -554,7 +561,7 @@ class PackingSlipCustomizer
      * Ocultar método de pago en PDFs (solo para packing slips)
      * 
      * @param string $payment_method_title Título del método de pago
-     * @param \WC_Order $order Objeto de pedido
+     * @param \WC_Order|\WC_Order_Refund $order Objeto de pedido o reembolso
      * @return string Título modificado (vacío para ocultar)
      */
     public function hidePaymentMethodInPdf($payment_method_title, $order = null): string
@@ -577,10 +584,10 @@ class PackingSlipCustomizer
      * Ocultar sección completa del método de pago usando CSS
      * 
      * @param string $document_type Tipo de documento
-     * @param \WC_Order $order Objeto de pedido
+     * @param mixed $order Objeto de pedido (WC_Order o WC_Order_Refund)
      * @return void
      */
-    public function hidePaymentMethodSection(string $document_type, \WC_Order $order): void
+    public function hidePaymentMethodSection(string $document_type, $order): void
     {
         // Solo aplicar a packing slips
         if ($document_type !== 'packing-slip') {
@@ -658,10 +665,10 @@ class PackingSlipCustomizer
      * Ocultar sección completa de la dirección de empresa usando CSS
      * 
      * @param string $document_type Tipo de documento
-     * @param \WC_Order $order Objeto de pedido
+     * @param mixed $order Objeto de pedido (WC_Order o WC_Order_Refund)
      * @return void
      */
-    public function hideCompanyAddressSection(string $document_type, \WC_Order $order): void
+    public function hideCompanyAddressSection(string $document_type, $order): void
     {
         // Solo aplicar a packing slips
         if ($document_type !== 'packing-slip') {
@@ -711,8 +718,9 @@ class PackingSlipCustomizer
 
     /**
      * Optimizar tabla de productos para que entren 36 elementos
+     * Acepta tanto WC_Order como WC_Order_Refund
      */
-    public function optimizeTableForSpace(string $document_type, \WC_Order $order): void
+    public function optimizeTableForSpace(string $document_type, $order): void
     {
         // Solo aplicar a packing slips
         if ($document_type !== 'packing-slip') {
@@ -786,8 +794,9 @@ class PackingSlipCustomizer
 
     /**
      * Eliminar completamente cualquier contenido de footer en packing slips
+     * Acepta tanto WC_Order como WC_Order_Refund
      */
-    public function removeFooterContent(string $document_type, \WC_Order $order): void
+    public function removeFooterContent(string $document_type, $order): void
     {
         // Solo aplicar a packing slips
         if ($document_type !== 'packing-slip') {

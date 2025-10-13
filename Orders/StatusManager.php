@@ -141,9 +141,9 @@ class StatusManager
         
         // Ya no necesitamos el filtro complejo - la protección en MasterOrderManager es suficiente
         
-        // Master Order bulk actions - DISABLED to avoid duplicates with MasterOrderManager
-        // add_filter('bulk_actions-woocommerce_page_wc-orders', [$this, 'addMasterOrderBulkActions']);
-        // add_filter('handle_bulk_actions-woocommerce_page_wc-orders', [$this, 'handleMasterOrderBulkActions'], 10, 3);
+        // Master Order bulk actions - Activadas para permitir cambios de estado manuales
+        add_filter('bulk_actions-woocommerce_page_wc-orders', [$this, 'addMasterOrderBulkActions']);
+        add_filter('handle_bulk_actions-woocommerce_page_wc-orders', [$this, 'handleMasterOrderBulkActions'], 10, 3);
         
         // Filtrar estados disponibles en el dropdown según el tipo de pedido
         add_filter('woocommerce_admin_order_actions', [$this, 'filterOrderActionsForMasterOrders'], 10, 2);
@@ -869,6 +869,12 @@ class StatusManager
                             __('Status changed to %s via bulk action', 'neve-child'),
                             $new_status
                         ));
+                        
+                        // 🎯 FUNCIONALIDAD ESPECIAL: Cambiar hijos cuando master order pasa a "almacén"
+                        if ($new_status === 'mast-warehs' && $current_status === 'master-order') {
+                            $this->changeChildOrdersToWarehouse($post_id);
+                        }
+                        
                         $changed++;
                     }
                 }
@@ -1140,6 +1146,71 @@ class StatusManager
 
         } catch (\Exception $e) {
             // Error silencioso
+        }
+    }
+
+    /**
+     * 🎯 NUEVO: Cambiar pedidos hijos a "warehouse" cuando master order pasa a "almacén"
+     * Solo para la transición de "validado" → "almacén" en bulk actions
+     * 
+     * @param int $master_order_id ID del pedido maestro
+     * @return void
+     */
+    private function changeChildOrdersToWarehouse(int $master_order_id): void
+    {
+        try {
+            $master_order = wc_get_order($master_order_id);
+            if (!$master_order || $master_order->get_meta('_is_master_order') !== 'yes') {
+                return;
+            }
+
+            // Obtener pedidos hijos incluidos
+            $included_orders = $master_order->get_meta('_included_orders') ?: [];
+            if (empty($included_orders)) {
+                return;
+            }
+
+            $changed_children = 0;
+            $skipped_children = 0;
+
+            foreach ($included_orders as $child_order_id) {
+                $child_order = wc_get_order($child_order_id);
+                if (!$child_order) {
+                    continue;
+                }
+
+                $current_child_status = $child_order->get_status();
+                
+                // No cambiar pedidos hijos que ya están completados, preparados o ya en almacén
+                if (in_array($current_child_status, ['completed', 'prepared', 'warehouse'])) {
+                    $skipped_children++;
+                    continue;
+                }
+                
+                // Cambiar a "warehouse" solo los que están en estados anteriores
+                $child_order->update_status('warehouse', 
+                    sprintf(__('Status automatically changed to Warehouse after master validated order #%d was moved to Master Warehouse via bulk action', 'neve-child'), $master_order_id)
+                );
+                $changed_children++;
+            }
+
+            // Agregar nota al pedido maestro sobre los cambios realizados
+            if ($changed_children > 0 || $skipped_children > 0) {
+                $note_parts = [];
+                
+                if ($changed_children > 0) {
+                    $note_parts[] = sprintf(__('%d child orders changed to "Warehouse"', 'neve-child'), $changed_children);
+                }
+                
+                if ($skipped_children > 0) {
+                    $note_parts[] = sprintf(__('%d child orders skipped (already completed/prepared/warehouse)', 'neve-child'), $skipped_children);
+                }
+                
+                $master_order->add_order_note(implode('. ', $note_parts));
+            }
+
+        } catch (\Exception $e) {
+            // Error silencioso para no interrumpir el bulk action
         }
     }
 

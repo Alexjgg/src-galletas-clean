@@ -18,33 +18,6 @@ if (!defined('ABSPATH')) {
  */
 class VendorPDFManager
 {
-    /**
-     * 🔒 PROTECCIÓN CONTRA MÚLTIPLES EJECUCIONES
-     * Cache para evitar procesamiento duplicado del mismo documento
-     */
-    private static $processing_cache = [];
-    private static $execution_count = 0;
-    
-    /**
-     * 🔒 Limpiar cache de procesamiento
-     */
-    public static function clearProcessingCache()
-    {
-        if (!empty(self::$processing_cache)) {
-            error_log("🔒 DEBUG: Limpiando cache con " . count(self::$processing_cache) . " entradas y " . self::$execution_count . " ejecuciones");
-        }
-        self::$processing_cache = [];
-        self::$execution_count = 0;
-    }
-    
-    /**
-     * 🔒 Limpiar cache después de crear PDF
-     */
-    public function clearCacheAfterPDF($document, $order)
-    {
-        self::clearProcessingCache();
-    }
-    
     public function __construct()
     {
         // ⚠️ ESTRATEGIA DE PROTECCIÓN: NO machacar números de facturas simplificadas existentes
@@ -80,8 +53,9 @@ class VendorPDFManager
         add_action('wpo_wcpdf_save_document', [$this, 'ensureAEATCompatibility'], 1, 2);
         add_action('wpo_wcpdf_after_pdf_created', [$this, 'ensureAEATCompatibility'], 1, 2);
         
-        // 🎯 HOOK ESPECÍFICO PARA AEAT - Actualizar contador solo cuando se envía a AEAT
-        add_action('factupress_before_generate_register', [$this, 'updateNumberForAEAT'], 10, 2);
+        // 🚀 HOOKS POST-CREACIÓN: Solo para confirmación y compatibilidad AEAT
+        add_action('wpo_wcpdf_after_pdf_created', [$this, 'finalizeNumberAssignment'], 99, 2);
+        add_action('wpo_wcpdf_document_saved', [$this, 'finalizeNumberAssignment'], 99, 2);
         
         // 🎯 INYECTAR VENDOR DATA EN SETTINGS GENERAL (coc_number Y vat_number)
         add_filter('option_wpo_wcpdf_settings_general', [$this, 'injectVendorDataInSettings'], 10);
@@ -110,10 +84,9 @@ class VendorPDFManager
         // 🎯 HOOK ADICIONAL: Capturar contexto después de crear documento
         add_action('wpo_wcpdf_created_document', [$this, 'cacheDocumentContext'], 1, 1);
         
-        // 🔒 HOOK PARA LIMPIAR CACHE al final del procesamiento
-        add_action('wpo_wcpdf_after_pdf_created', [$this, 'clearCacheAfterPDF'], 99, 2);
-        add_action('wp_footer', [__CLASS__, 'clearProcessingCache'], 999);
-        add_action('admin_footer', [__CLASS__, 'clearProcessingCache'], 999);
+        // 🛡️ HOOKS ESPECÍFICOS PARA DETECTAR MODO PREVIEW DEL PLUGIN OFICIAL
+        add_action('wpo_wcpdf_preview_after_reload_settings', [$this, 'markPreviewMode'], 1);
+        add_action('wp_ajax_wpo_wcpdf_preview', [$this, 'markPreviewMode'], 1);
 
     }
 
@@ -123,45 +96,31 @@ class VendorPDFManager
      */
     public function applyVendorNumbering($formatted_number, $document, $document_type = null, $order = null)
     {
-        // � PROTECCIÓN ANTI-DUPLICACIÓN - Incrementar contador de ejecución
-        self::$execution_count++;
-        
-        // �🐛 DEBUG TEMPORAL - Log de parámetros de entrada con contador
-        error_log("🔍 DEBUG applyVendorNumbering LLAMADO #{" . self::$execution_count . "}");
-        error_log("🔍 DEBUG formatted_number: " . ($formatted_number ?: 'EMPTY'));
-        error_log("🔍 DEBUG document_type param: " . ($document_type ?: 'NULL'));
-        error_log("🔍 DEBUG document class: " . (is_object($document) ? get_class($document) : 'NOT_OBJECT'));
-        
-        // 🔒 PROTECCIÓN: Salir inmediatamente si no es objeto válido
-        if (!is_object($document)) {
-            error_log("🔒 DEBUG: Saltando - document no es objeto válido");
-            return $formatted_number;
+        // �️ PROTECCIÓN CRÍTICA: NO procesar vistas previas del admin
+        if ($this->isAdminPreview()) {
+
+            // Para vistas previas, devolver un número simulado sin incrementar contadores
+            // En preview, permitir que el plugin maneje la numeracion normalmente
+            // PERO marcar una flag para que getTemporaryNumber no incremente
+            $GLOBALS['wpo_wcpdf_preview_no_increment'] = true;
+            // Continuar con la logica normal para que el plugin no se rompa
         }
         
-        // Obtener document_type si no se proporciona
+        // �🐛 DEBUG TEMPORAL - Log de parámetros de entrada SIEMPRE
+
+
+
+
+        
+
+        if (!is_object($document)) {
+            return $formatted_number;
+        }
+
+        // Obtener document_type
         if (!$document_type && method_exists($document, 'get_type')) {
             $document_type = $document->get_type();
         }
-        
-        // Obtener order_id para crear clave de cache
-        $order_id = $this->getOrderIdFromDocument($document);
-        if (!$order_id && $order) {
-            $order_id = is_numeric($order) ? $order : (is_object($order) && method_exists($order, 'get_id') ? $order->get_id() : null);
-        }
-        
-        // 🔒 CREAR CLAVE ÚNICA PARA CACHE
-        $cache_key = $document_type . '_' . ($order_id ?: 'no_order') . '_' . get_class($document);
-        
-        // 🔒 VERIFICAR SI YA ESTÁ EN PROCESO O COMPLETADO
-        if (isset(self::$processing_cache[$cache_key])) {
-            error_log("🔒 DEBUG: Evitando ejecución duplicada para cache_key: {$cache_key}");
-            error_log("🔒 DEBUG: Retornando valor cacheado: " . self::$processing_cache[$cache_key]);
-            return self::$processing_cache[$cache_key];
-        }
-        
-        // 🔒 MARCAR COMO EN PROCESO (valor temporal)
-        self::$processing_cache[$cache_key] = $formatted_number;
-
         
         // Tipos de documento soportados
         $supported_types = ['invoice', 'simplified-invoice', 'credit-note', 'simplified-credit-note'];
@@ -175,9 +134,7 @@ class VendorPDFManager
             $order_id = is_numeric($order) ? $order : (is_object($order) && method_exists($order, 'get_id') ? $order->get_id() : null);
         }
         
-        // 🐛 DEBUG TEMPORAL - Log específico para orden 1507
-        error_log("🔍 DEBUG order_id obtenido: " . ($order_id ?: 'NULL'));
-        error_log("🔍 DEBUG order param: " . (is_object($order) ? get_class($order) : ($order ?: 'NULL')));
+
         
         if (!$order_id) {
             return $formatted_number;
@@ -187,11 +144,9 @@ class VendorPDFManager
         $vendor_id = $this->getVendorId($order_id);
         
         if (!$vendor_id) {
-            error_log("🔒 DEBUG: No vendor_id encontrado para order {$order_id}");
             return $formatted_number;
         }
-        
-        // Verificar si debemos aplicar numeración personalizada
+            // Verificar si debemos aplicar numeración personalizada
         if (!$this->shouldApplyCustomNumbering($document_type, $order_id)) {
             // NO aplicar numeración personalizada, pero SÍ procesar Tax ID
             // (Este es el caso de las facturas normales que ya tienen número)
@@ -202,25 +157,12 @@ class VendorPDFManager
             $order_obj = wc_get_order($order_id);
             $existing_meta = $order_obj ? $order_obj->get_meta($meta_key) : '';
             
-            // 🐛 DEBUG TEMPORAL - Para orden 1507
-            if ($order_id == 1507) {
-                error_log("🔍 DEBUG Order 1507 - document_type: {$document_type}");
-                error_log("🔍 DEBUG Order 1507 - normalized_document_type: {$normalized_document_type}");
-                error_log("🔍 DEBUG Order 1507 - meta_key: {$meta_key}");
-                error_log("🔍 DEBUG Order 1507 - existing_meta: " . ($existing_meta ?: 'EMPTY'));
-                error_log("🔍 DEBUG Order 1507 - formatted_number: " . ($formatted_number ?: 'EMPTY'));
-            }
+
             
             if (!empty($existing_meta)) {
-                // 🔒 GUARDAR RESULTADO EN CACHE
-                self::$processing_cache[$cache_key] = $existing_meta;
-                error_log("🔒 DEBUG: Guardado existing_meta en cache {$cache_key} = {$existing_meta}");
                 return $existing_meta; // Devolver el número guardado (ej: "00001-2025")
             }
             
-            // 🔒 GUARDAR RESULTADO EN CACHE
-            self::$processing_cache[$cache_key] = $formatted_number;
-            error_log("🔒 DEBUG: Guardado formatted_number en cache {$cache_key} = {$formatted_number}");
             return $formatted_number; // Fallback al número original si no hay meta
         }
 
@@ -232,29 +174,27 @@ class VendorPDFManager
         $vendor_suffix = get_field($suffix_field, $vendor_id) ?: '';
         
         if (empty($vendor_prefix)) {
-            // 🔒 GUARDAR RESULTADO EN CACHE
-            self::$processing_cache[$cache_key] = $formatted_number;
-            error_log("🔒 DEBUG: Guardado fallback en cache {$cache_key} = {$formatted_number}");
             return $formatted_number;
         }
 
-        // Obtener siguiente número
-        $vendor_number = $this->getNextNumber($vendor_id, $order_id, $document_type);
+        // 🚀 NUEVO: Obtener número temporal (SIN incrementar)
+        $vendor_number = $this->getTemporaryNumber($vendor_id, $order_id, $document_type);
 
         // Formatear: PREFIX + NUMERO + SUFFIX
         $number_str = str_pad($vendor_number, 5, '0', STR_PAD_LEFT);
         $custom_number = $vendor_prefix . $number_str . $vendor_suffix;
         
-        // PROTECCIÓN: NO machacar números de facturas simplificadas para AEAT
+        // PROTECCION: NO machacar numeros de facturas simplificadas para AEAT
         // Solo guardar en meta para credit notes, NO para invoices/simplified-invoices
         if (strpos($document_type, 'credit-note') !== false) {
             $aeat_key = "_wcpdf_{$document_type}_number";
             update_post_meta($order_id, $aeat_key, $custom_number);
         }
         
-        // 🔒 GUARDAR RESULTADO FINAL EN CACHE
-        self::$processing_cache[$cache_key] = $custom_number;
-        error_log("🔒 DEBUG: Guardado en cache {$cache_key} = {$custom_number}");
+        // Limpiar flag de preview para evitar que afecte otros procesos
+        if (isset($GLOBALS['wpo_wcpdf_preview_no_increment'])) {
+            unset($GLOBALS['wpo_wcpdf_preview_no_increment']);
+        }
         
         return $custom_number;
     }
@@ -333,7 +273,8 @@ class VendorPDFManager
             return null;
         }
 
-        $vendor_number = $this->getNextNumber($vendor_id, $order_id, $document_type);
+        // 🚀 NUEVO: Usar número temporal
+        $vendor_number = $this->getTemporaryNumber($vendor_id, $order_id, $document_type);
         $number_str = str_pad($vendor_number, 4, '0', STR_PAD_LEFT);
         
         return $vendor_prefix . $number_str . $vendor_suffix;
@@ -909,7 +850,97 @@ class VendorPDFManager
     }
 
     /**
-     * Obtener siguiente número de documento (SOLO PARA MOSTRAR - NO ACTUALIZA)
+     * 🚀 NUEVO: Sistema de reserva de números inspirado en SequentialNumberStore
+     * Reserva inmediatamente el siguiente número disponible para evitar duplicados
+     */
+    private function getTemporaryNumber($vendor_id, $order_id, $document_type)
+    {
+        // 0. PROTECCION CRITICA: Detectar si es vista previa del admin (NO incrementar numeros)
+        if ($this->isAdminPreview() || (isset($GLOBALS['wpo_wcpdf_preview_no_increment']) && $GLOBALS['wpo_wcpdf_preview_no_increment'])) {
+
+            // Devolver numero simulado sin incrementar contador real
+            $number_field = $this->getNumberField($document_type);
+            $current_number = get_field($number_field, $vendor_id) ?: 0;
+            return (int) $current_number + 1;
+        }
+        
+        // 1. Verificar si ya tiene número definitivo asignado
+        $assigned_key = "_vendor_{$document_type}_number_{$vendor_id}";
+        $assigned_number = get_post_meta($order_id, $assigned_key, true);
+        
+        if ($assigned_number) {
+
+            return (int) $assigned_number;
+        }
+        
+        // 2. SISTEMA DE SEMÁFORO para evitar condiciones de carrera (como el plugin original)
+        $semaphore_key = "vendor_number_lock_{$vendor_id}_{$document_type}";
+        $lock_timeout = 10; // 10 segundos máximo
+        $lock_value = time();
+        
+        // Intentar obtener bloqueo
+        $existing_lock = get_transient($semaphore_key);
+        if ($existing_lock && ($lock_value - $existing_lock) < $lock_timeout) {
+            // Esperar y reintentar una vez
+            usleep(100000); // 0.1 segundos
+            $existing_lock = get_transient($semaphore_key);
+            
+            if ($existing_lock && ($lock_value - $existing_lock) < $lock_timeout) {
+
+                // Fallback: devolver número no reservado (puede causar duplicados pero evita bloqueo)
+                $number_field = $this->getNumberField($document_type);
+                $current_number = get_field($number_field, $vendor_id) ?: 0;
+                return (int) $current_number + 1;
+            }
+        }
+        
+        // 3. Establecer bloqueo
+        set_transient($semaphore_key, $lock_value, $lock_timeout);
+        
+        try {
+            // 4. RESERVAR INMEDIATAMENTE EL SIGUIENTE NÚMERO (como hace SequentialNumberStore::increment)
+            $number_field = $this->getNumberField($document_type);
+            $current_number = get_field($number_field, $vendor_id) ?: 0;
+            $next_number = (int) $current_number + 1;
+            
+            // 5. Actualizar INMEDIATAMENTE el campo ACF para reservar el número
+            $update_success = update_field($number_field, $next_number, $vendor_id);
+            
+            if ($update_success) {
+                // 6. Asignar este número específicamente a esta orden
+                update_post_meta($order_id, $assigned_key, $next_number);
+                
+
+                
+                // 7. Liberar bloqueo
+                delete_transient($semaphore_key);
+                
+                return $next_number;
+            } else {
+
+                
+                // Liberar bloqueo
+                delete_transient($semaphore_key);
+                
+                // Fallback
+                return $next_number;
+            }
+            
+        } catch (\Exception $e) {
+
+            
+            // Liberar bloqueo en caso de excepción
+            delete_transient($semaphore_key);
+            
+            // Fallback básico
+            $number_field = $this->getNumberField($document_type);
+            $current_number = get_field($number_field, $vendor_id) ?: 0;
+            return (int) $current_number + 1;
+        }
+    }
+
+    /**
+     * Obtener siguiente número de documento
      */
     private function getNextNumber($vendor_id, $order_id, $document_type)
     {
@@ -921,63 +952,7 @@ class VendorPDFManager
             return (int) $assigned_number;
         }
         
-        // Solo obtener el próximo número SIN actualizar el contador
-        $number_field = $this->getNumberField($document_type);
-        $current_number = get_field($number_field, $vendor_id) ?: 0;
-        $next_number = (int) $current_number + 1;
-        
-        return $next_number;
-    }
-
-    /**
-     * Actualizar contador de números SOLO cuando se envía a AEAT
-     * Usa transient para asegurar que solo se actualice UNA VEZ por vendor/document_type
-     */
-    public function updateNumberForAEAT($order_id, $document_type)
-    {
-        // Obtener vendor ID
-        $vendor_id = $this->getVendorId($order_id);
-        if (!$vendor_id) {
-            return;
-        }
-
-        // Verificar si ya tiene número asignado
-        $assigned_key = "_vendor_{$document_type}_number_{$vendor_id}";
-        $assigned_number = get_post_meta($order_id, $assigned_key, true);
-        
-        if ($assigned_number) {
-            // Ya tiene número, no hacer nada
-            return;
-        }
-        
-        // Usar transient para asegurar que el contador solo se actualice UNA VEZ
-        // Clave única por vendor y tipo de documento
-        $update_key = "vendor_counter_updated_{$vendor_id}_{$document_type}";
-        
-        // Si ya se actualizó en esta sesión de envío, obtener el nuevo número del campo
-        if (get_transient($update_key)) {
-            // El contador ya fue actualizado por otro pedido en esta sesión
-            // Obtener el número actual y asignar el siguiente disponible
-            $number_field = $this->getNumberField($document_type);
-            $current_number = get_field($number_field, $vendor_id) ?: 0;
-            
-            // Buscar el siguiente número disponible
-            $next_available = $this->getNextAvailableNumber($vendor_id, $document_type, $current_number);
-            
-            // Asignar este número al pedido
-            update_post_meta($order_id, $assigned_key, $next_available);
-            
-            // Guardar formato AEAT
-            $this->saveAEATFormat($order_id, $vendor_id, $document_type, $next_available);
-            
-            return;
-        }
-        
-        // PRIMERA VEZ que se actualiza el contador en esta sesión
-        // Marcar que ya se actualizó (válido por 30 segundos)
-        set_transient($update_key, true, 30);
-        
-        // Actualizar el contador ACF
+        // Obtener y actualizar el contador
         $number_field = $this->getNumberField($document_type);
         $current_number = get_field($number_field, $vendor_id) ?: 0;
         $next_number = (int) $current_number + 1;
@@ -985,66 +960,86 @@ class VendorPDFManager
         // Actualizar campo ACF
         update_field($number_field, $next_number, $vendor_id);
         
-        // Asignar este número al pedido actual
+        // Guardar número asignado
         update_post_meta($order_id, $assigned_key, $next_number);
         
-        // Guardar formato AEAT
-        $this->saveAEATFormat($order_id, $vendor_id, $document_type, $next_number);
-    }
-    
-    /**
-     * Obtener el siguiente número disponible para un pedido
-     */
-    private function getNextAvailableNumber($vendor_id, $document_type, $base_number)
-    {
-        global $wpdb;
-        
-        // Buscar números ya asignados para este vendor/document_type
-        $assigned_key = "_vendor_{$document_type}_number_{$vendor_id}";
-        
-        $used_numbers = $wpdb->get_col($wpdb->prepare(
-            "SELECT CAST(meta_value AS UNSIGNED) as num 
-             FROM {$wpdb->postmeta} 
-             WHERE meta_key = %s 
-             AND CAST(meta_value AS UNSIGNED) > %d
-             ORDER BY num ASC",
-            $assigned_key,
-            $base_number - 50 // Buscar en un rango razonable
-        ));
-        
-        // Buscar el primer hueco disponible
-        $next_number = $base_number;
-        foreach ($used_numbers as $used_num) {
-            if ($next_number < $used_num) {
-                break; // Encontramos un hueco
-            }
-            $next_number = max($next_number, $used_num) + 1;
-        }
-        
-        return $next_number;
-    }
-    
-    /**
-     * Guardar número en formato AEAT
-     */
-    private function saveAEATFormat($order_id, $vendor_id, $document_type, $number)
-    {
+        // IMPORTANTE: También guardar en el formato que espera AEAT
         $vendor_prefix = get_field($this->getPrefixField($document_type), $vendor_id) ?: '';
         $vendor_suffix = get_field($this->getSuffixField($document_type), $vendor_id) ?: '';
         
         if (!empty($vendor_prefix)) {
-            $number_str = str_pad($number, 4, '0', STR_PAD_LEFT);
+            $number_str = str_pad($next_number, 4, '0', STR_PAD_LEFT);
             $formatted_number = $vendor_prefix . $number_str . $vendor_suffix;
             
-            // Guardar para AEAT
-            $aeat_key = "_wcpdf_{$document_type}_number";
-            update_post_meta($order_id, $aeat_key, $formatted_number);
+            // PROTECCIÓN: Solo guardar en metadatos AEAT para credit notes, NO para facturas
+            if (strpos($document_type, 'credit-note') !== false) {
+                $aeat_key = "_wcpdf_{$document_type}_number";
+                update_post_meta($order_id, $aeat_key, $formatted_number);
+            }
+        }
+        
+        return $next_number;
+    }
+
+    /**
+     * 🚀 SIMPLIFICADO: Solo confirmar que el PDF se creó correctamente
+     * La numeración ya se hace en getTemporaryNumber() con sistema de semáforos
+     */
+    public function finalizeNumberAssignment($document, $filename = null)
+    {
+        if (!is_object($document)) {
+            return;
+        }
+
+        // Obtener información del documento
+        $document_type = method_exists($document, 'get_type') ? $document->get_type() : null;
+        $order_id = $this->getOrderIdFromDocument($document);
+        
+        if (!$order_id || !$document_type) {
+            return;
+        }
+
+        // Tipos soportados
+        $supported_types = ['invoice', 'simplified-invoice', 'credit-note', 'simplified-credit-note'];
+        if (!in_array($document_type, $supported_types)) {
+            return;
+        }
+
+        $vendor_id = $this->getVendorId($order_id);
+        if (!$vendor_id) {
+            return;
+        }
+
+        // Verificar si debemos aplicar numeración personalizada
+        if (!$this->shouldApplyCustomNumbering($document_type, $order_id)) {
+            return;
+        }
+
+        // Obtener el número que ya fue reservado
+        $assigned_key = "_vendor_{$document_type}_number_{$vendor_id}";
+        $assigned_number = get_post_meta($order_id, $assigned_key, true);
+        
+        if ($assigned_number) {
+
             
-            // También en formato underscore
-            $aeat_key_underscore = "_wcpdf_" . str_replace('-', '_', $document_type) . "_number";
-            update_post_meta($order_id, $aeat_key_underscore, $formatted_number);
-            
-            error_log("VendorPDFManager: Assigned number $number ($formatted_number) to order $order_id");
+            // Asegurar compatibilidad AEAT para credit notes
+            if (strpos($document_type, 'credit-note') !== false) {
+                $vendor_prefix = get_field($this->getPrefixField($document_type), $vendor_id) ?: '';
+                $vendor_suffix = get_field($this->getSuffixField($document_type), $vendor_id) ?: '';
+                
+                if (!empty($vendor_prefix)) {
+                    $number_str = str_pad($assigned_number, 4, '0', STR_PAD_LEFT);
+                    $formatted_number = $vendor_prefix . $number_str . $vendor_suffix;
+                    
+                    $aeat_key = "_wcpdf_{$document_type}_number";
+                    $existing_aeat = get_post_meta($order_id, $aeat_key, true);
+                    
+                    if (empty($existing_aeat)) {
+                        update_post_meta($order_id, $aeat_key, $formatted_number);
+
+                    }
+                }
+            }
         }
     }
 
@@ -1199,18 +1194,7 @@ class VendorPDFManager
             $order = wc_get_order($order_id);
             $existing_meta = $order ? $order->get_meta($meta_key) : '';
             
-            // 🐛 DEBUG TEMPORAL - Para orden 1507 o si order_id es null
-            if ($order_id == 1507 || !$order_id) {
-                error_log("🔍 DEBUG shouldApplyCustomNumbering - Order {$order_id} [HPOS COMPATIBLE]");
-                error_log("🔍 DEBUG order_id recibido: " . ($order_id ?: 'NULL'));
-                error_log("🔍 DEBUG order object: " . ($order ? get_class($order) : 'NULL'));
-                error_log("🔍 DEBUG document_type: {$document_type}");
-                error_log("🔍 DEBUG normalized_document_type: {$normalized_document_type}");
-                error_log("🔍 DEBUG meta_key: {$meta_key}");
-                error_log("🔍 DEBUG existing_meta (WC): " . ($existing_meta ?: 'EMPTY'));
-                error_log("🔍 DEBUG existing_meta (legacy): " . (get_post_meta($order_id, $meta_key, true) ?: 'EMPTY'));
-                error_log("🔍 DEBUG empty(existing_meta): " . (empty($existing_meta) ? 'TRUE' : 'FALSE'));
-            }
+
             
             $result = empty($existing_meta);
             
@@ -1471,5 +1455,59 @@ class VendorPDFManager
             return $vendor_tax_id;
         }
         return $text;
+    }
+
+    // ========== PREVIEW PROTECTION METHODS ==========
+
+    /**
+     * Mark preview mode using official plugin hooks
+     */
+    public function markPreviewMode()
+    {
+        $GLOBALS['wpo_wcpdf_preview_mode'] = true;
+
+    }
+
+    /**
+     * Detect if we are in admin preview mode (DO NOT increment numbers)
+     * Uses the same logic as WooCommerce PDF Invoices & Packing Slips plugin
+     * 
+     * @return bool True if admin preview
+     */
+    private function isAdminPreview()
+    {
+        // 🎯 MÉTODO 1: Variable global establecida por nuestros hooks del plugin oficial
+        if (isset($GLOBALS['wpo_wcpdf_preview_mode']) && $GLOBALS['wpo_wcpdf_preview_mode']) {
+
+            return true;
+        }
+        
+        // 🎯 MÉTODO 2: Misma lógica que usa el plugin en OrderDocument.php línea 145-149
+        // Este es el método más seguro porque usa exactamente la misma detección del plugin oficial
+        if (
+            isset( $_REQUEST['action'] ) &&
+            'wpo_wcpdf_preview' === $_REQUEST['action'] &&
+            isset( $_REQUEST['security'] ) &&
+            wp_verify_nonce( sanitize_text_field( wp_unslash( $_REQUEST['security'] ) ), 'wpo_wcpdf_preview' )
+        ) {
+
+            return true;
+        }
+        
+        // 🎯 MÉTODO 3: Contexto del admin de configuración (más conservador)
+        if (is_admin() && isset($_GET['page']) && $_GET['page'] === 'wpo_wcpdf_options_page') {
+            // Solo considerar como preview si hay una acción específica de preview
+            if (isset($_GET['action']) && strpos($_GET['action'], 'preview') !== false) {
+                return true;
+            }
+        }
+        
+        // 🎯 MÉTODO 4: AJAX preview sin nonce (backup más permisivo)
+        if (defined('DOING_AJAX') && DOING_AJAX && isset($_REQUEST['action']) && $_REQUEST['action'] === 'wpo_wcpdf_preview') {
+
+            return true;
+        }
+        
+        return false;
     }
 }

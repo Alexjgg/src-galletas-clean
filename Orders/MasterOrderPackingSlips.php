@@ -8,7 +8,7 @@
  * FUNCIONALIDADES:
  * 1. Agregar botones de PDF específicos para pedidos maestros en admin
  * 2. Usar las URLs del plugin WC PDF para generar albaranes masivos
- * 3. Manejar cambios de estado automáticos cuando se generan PDFs
+ * 3. ⚠️ NO cambiar estados automáticamente al generar PDFs (solo via bulk actions)
  * 4. Controlar flujo de estados de master orders y pedidos hijos
  * 
  * NOTA: 
@@ -92,8 +92,9 @@ class MasterOrderPackingSlips
             return;
         }
         
-        // Actualizar estados cuando se genera el PDF combinado
-        $this->updateOrderStatusesAfterZipGeneration($master_order_id);
+        // ⚠️ DESACTIVADO: NO cambiar estados automáticamente al generar PDF
+        // Los cambios de estado ahora solo se hacen mediante bulk actions
+        // $this->updateOrderStatusesAfterZipGeneration($master_order_id);
     }
 
     /**
