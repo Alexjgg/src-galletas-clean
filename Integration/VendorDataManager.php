@@ -41,6 +41,7 @@ class VendorDataManager
         
         // 🎯 HOOK SIMPLE: Interceptar NIF para QRs de VeriFactu
         add_filter('verifactu_qr_nif', [$this, 'changeNifForQR'], 10, 4);
+        add_filter('factupress_facturae_disable_registers', '__return_true'); // Desactivar registros en Factupress
     }
 
     /**

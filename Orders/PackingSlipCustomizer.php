@@ -53,7 +53,7 @@ class PackingSlipCustomizer
         // Hooks para mostrar número de alumno en TODOS los albaranes
         // DESHABILITADO: Para evitar duplicados con las direcciones
         // add_action('wpo_wcpdf_before_order_details', [$this, 'displayStudentNumberInPdf'], 1, 2);
-
+        add_filter('factupress_templates_disable_verifactu_items_metas', [$this,'disableVerifactuItemsMetas']);
         // Hook para mostrar información del estudiante después del área de direcciones de envío
         add_action('wpo_wcpdf_after_shipping_address', [$this, 'displayStudentInfoAfterAddresses'], 10, 2);
 
@@ -87,7 +87,9 @@ class PackingSlipCustomizer
         add_action('wpo_wcpdf_after_order_details', [$this, 'removeFooterContent'], 999, 2);
         add_action('wpo_wcpdf_after_document', [$this, 'removeFooterContent'], 999, 2);
     }
-
+  public function disableVerifactuItemsMetas() {
+        return true;
+    }
     /**
      * Verificar compatibilidad con el plugin WC PDF
      */
@@ -729,6 +731,14 @@ class PackingSlipCustomizer
 
         ?>
         <style>
+
+            table.order-data-addresses {
+	 margin-bottom: 0!important; 
+}
+ .quantity {
+	text-align: left !important;
+	width: 40% !important;
+}
         /* Optimización de tabla para que entren 36 elementos */
         .order-details table,
         .order-items table,
@@ -748,7 +758,7 @@ class PackingSlipCustomizer
         table.order-details th,
         table.order-items td,
         table.order-items th {
-            font-size: 10px !important;
+            font-size: 12px !important;
             padding: 0px 1px !important;
             line-height: 1 !important;
             margin: 0 !important;
@@ -765,7 +775,14 @@ class PackingSlipCustomizer
             margin: 0 !important;
             padding: 0 !important;
         }
-        
+               /* Alternar colores de fondo para filas pares */
+        .order-details tbody tr:nth-child(even),
+        .order-items tbody tr:nth-child(even),
+        #order_details_table tbody tr:nth-child(even),
+        table.order-details tbody tr:nth-child(even),
+        table.order-items tbody tr:nth-child(even) {
+            background-color: #f7f7f7ff !important;
+        }
         .order-details table,
         .order-items table,
         #order_details_table,

@@ -105,13 +105,6 @@ class VendorPDFManager
             $GLOBALS['wpo_wcpdf_preview_no_increment'] = true;
             // Continuar con la logica normal para que el plugin no se rompa
         }
-        
-        // �🐛 DEBUG TEMPORAL - Log de parámetros de entrada SIEMPRE
-
-
-
-
-        
 
         if (!is_object($document)) {
             return $formatted_number;
@@ -275,7 +268,7 @@ class VendorPDFManager
 
         // 🚀 NUEVO: Usar número temporal
         $vendor_number = $this->getTemporaryNumber($vendor_id, $order_id, $document_type);
-        $number_str = str_pad($vendor_number, 4, '0', STR_PAD_LEFT);
+        $number_str = str_pad($vendor_number, 5, '0', STR_PAD_LEFT);
         
         return $vendor_prefix . $number_str . $vendor_suffix;
     }
@@ -968,7 +961,7 @@ class VendorPDFManager
         $vendor_suffix = get_field($this->getSuffixField($document_type), $vendor_id) ?: '';
         
         if (!empty($vendor_prefix)) {
-            $number_str = str_pad($next_number, 4, '0', STR_PAD_LEFT);
+            $number_str = str_pad($next_number, 5, '0', STR_PAD_LEFT);
             $formatted_number = $vendor_prefix . $number_str . $vendor_suffix;
             
             // PROTECCIÓN: Solo guardar en metadatos AEAT para credit notes, NO para facturas
@@ -1028,7 +1021,7 @@ class VendorPDFManager
                 $vendor_suffix = get_field($this->getSuffixField($document_type), $vendor_id) ?: '';
                 
                 if (!empty($vendor_prefix)) {
-                    $number_str = str_pad($assigned_number, 4, '0', STR_PAD_LEFT);
+                    $number_str = str_pad($assigned_number, 5, '0', STR_PAD_LEFT);
                     $formatted_number = $vendor_prefix . $number_str . $vendor_suffix;
                     
                     $aeat_key = "_wcpdf_{$document_type}_number";
@@ -1496,8 +1489,9 @@ class VendorPDFManager
         
         // 🎯 MÉTODO 3: Contexto del admin de configuración (más conservador)
         if (is_admin() && isset($_GET['page']) && $_GET['page'] === 'wpo_wcpdf_options_page') {
-            // Solo considerar como preview si hay una acción específica de preview
-            if (isset($_GET['action']) && strpos($_GET['action'], 'preview') !== false) {
+            // Solo considerar como preview si estamos viendo documentos específicos
+            if (isset($_GET['tab']) && $_GET['tab'] === 'documents') {
+
                 return true;
             }
         }
