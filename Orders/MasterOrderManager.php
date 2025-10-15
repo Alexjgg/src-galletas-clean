@@ -1745,9 +1745,6 @@ class MasterOrderManager
         
         // Verificar que el pedido esté en la lista
         if (!in_array($order_id, $included_orders)) {
-            $order->add_order_note(
-                sprintf(__('Order was not found in master order #%d included orders list', 'neve-child'), $master_order_id)
-            );
             return false;
         }
 

@@ -190,13 +190,14 @@ class PackingSlipCustomizer
         // Para pedidos maestros, mostrar solo el nombre del colegio en company
         if ($order->get_meta('_is_master_order') === 'yes') {
             $school_name = $this->getSchoolName($order);
+            $school_city = $this->getSchoolCity($order);
             return [
                 'first_name' => '',
                 'last_name' => '',
                 'company' => $school_name, // Mantener nombre del colegio
                 'address_1' => '',
                 'address_2' => '',
-                'city' => '',
+                'city' => $school_city, // Usar ciudad del colegio
                 'state' => '',
                 'postcode' => '',
                 'country' => '',
@@ -242,13 +243,14 @@ class PackingSlipCustomizer
         // Para pedidos maestros, mostrar solo el nombre del colegio en company
         if ($order->get_meta('_is_master_order') === 'yes') {
             $school_name = $this->getSchoolName($order);
+            $school_city = $this->getSchoolCity($order);
             return [
                 'first_name' => '',
                 'last_name' => '',
                 'company' => $school_name, // Mantener nombre del colegio
                 'address_1' => '',
                 'address_2' => '',
-                'city' => '',
+                'city' => $school_city, // Usar ciudad del colegio
                 'state' => '',
                 'postcode' => '',
                 'country' => '',
@@ -407,6 +409,53 @@ class PackingSlipCustomizer
         }
         
         return $school_name;
+    }
+
+    /**
+     * Obtener la ciudad del colegio desde los datos del colegio
+     * @param \WC_Order|\WC_Order_Refund $order El pedido o reembolso
+     */
+    private function getSchoolCity($order): string
+    {
+        $school_city = '';
+        
+        // Intentar obtener el ID del colegio
+        $school_id = $order->get_meta('_school_id');
+        
+        if (!empty($school_id)) {
+            // Obtener ciudad desde ACF del colegio - usar 'city' como campo principal
+            if (function_exists('get_field')) {
+                $school_city = get_field('city', $school_id) ?: '';
+                
+                // Fallback: intentar otros campos posibles para ciudad
+                if (empty($school_city)) {
+                    $school_city = get_field('_city', $school_id) ?: '';
+                }
+                if (empty($school_city)) {
+                    $school_city = get_field('_town', $school_id) ?: '';
+                }
+                if (empty($school_city)) {
+                    $school_city = get_field('town', $school_id) ?: '';
+                }
+            }
+            
+            // Fallback: obtener desde post meta directo
+            if (empty($school_city)) {
+                $school_city = get_post_meta($school_id, 'city', true);
+                if (empty($school_city)) {
+                    $school_city = get_post_meta($school_id, '_city', true);
+                }
+                if (empty($school_city)) {
+                    $school_city = get_post_meta($school_id, '_town', true);
+                }
+                if (empty($school_city)) {
+                    $school_city = get_post_meta($school_id, 'town', true);
+                }
+            }
+        }
+        
+        // Si no encontramos ciudad del colegio, usar fallback vacío
+        return (string) $school_city;
     }
 
     /**
