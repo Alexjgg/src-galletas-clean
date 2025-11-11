@@ -4,7 +4,7 @@
  * 
  * Sistema modular para gestión de centros escolares con autoloader PSR-4
  * y inicialización controlada de dependencias.
- * 
+ *  
  * @package SchoolManagement
  * @since 1.0.0
  * @author Alexis Galletas System
@@ -162,9 +162,9 @@ class SchoolManagementBootstrap {
                 'SchoolManagement\Orders\TeacherPdfRestrictionsManager' => [],
                 'SchoolManagement\Orders\TeacherMasterOrderPdfRestrictions' => [],
                 'SchoolManagement\Orders\MSRPAccumulator' => [],
-                'SchoolManagement\Orders\MSRPTotalRecalculator' => [
-                    'store_global' => 'msrp_total_recalculator_instance'
-                ],
+                // 'SchoolManagement\Orders\MSRPTotalRecalculator' => [
+                //     'store_global' => 'msrp_total_recalculator_instance'
+                // ],
             ],
             
             // MÓDULOS DE PAGOS
@@ -183,7 +183,7 @@ class SchoolManagementBootstrap {
                     'dependencies' => ['SchoolManagement\Payments\PaymentStatusColumn'],
                     'store_global' => 'bank_transfer_bulk_actions_instance'
                 ],
-                'SchoolManagement\Payments\RefundRestrictions' => [
+                 'SchoolManagement\Payments\RefundRestrictions' => [
                     'dependencies' => ['SchoolManagement\Payments\PaymentStatusColumn'],
                     'store_global' => 'refund_restrictions_instance'
                 ],
@@ -196,7 +196,7 @@ class SchoolManagementBootstrap {
             
             ],
             
-            // MÓDULOS DE INTEGRACIÓN
+             // MÓDULOS DE INTEGRACIÓN
             'integration' => [
                 // Componentes especializados (se cargan primero)
                 // 'SchoolManagement\Integration\VendorAEATIntegration' => [
@@ -287,28 +287,21 @@ class SchoolManagementBootstrap {
             $args = $config['args'] ?? [];
             
             // Resolver dependencias como argumentos
-            $dependencyInstances = [];
             if (!empty($config['dependencies'])) {
                 foreach ($config['dependencies'] as $dependency) {
-                    if (!isset(self::$services[$dependency])) {
-                        throw new Exception("Dependencia no encontrada: {$dependency} para {$className}");
-                    }
-                    $dependencyInstances[] = self::$services[$dependency];
+                    $args[] = self::$services[$dependency];
                 }
             }
-            
-            // Combinar argumentos configurados con dependencias
-            $allArgs = array_merge($args, $dependencyInstances);
             
             // Crear instancia
             if ($className === 'SchoolManagement\Payments\PaymentHandler') {
                 // Usar singleton para PaymentHandler
                 $instance = $className::getInstance();
-              
+             
             } else {
-                $instance = empty($allArgs) 
+                $instance = empty($args) 
                     ? new $className() 
-                    : new $className(...$allArgs);
+                    : new $className(...$args);
             }
             
             // Almacenar en servicios
@@ -318,6 +311,9 @@ class SchoolManagementBootstrap {
             if (!empty($config['store_global'])) {
                 $GLOBALS[$config['store_global']] = $instance;
                 
+                // Log adicional para PaymentHandler
+                if ($className === 'SchoolManagement\Payments\PaymentHandler') {
+                }
             }
             
         } catch (Throwable $e) {

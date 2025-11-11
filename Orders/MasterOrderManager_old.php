@@ -505,7 +505,6 @@ class MasterOrderManager
      */
     private function addOrderToMasterOrder(int $order_id, int $master_order_id): bool
     {
-        // VERIFICACIÓN RÁPIDA PRE-LOCK: Evitar locks innecesarios
         $order = wc_get_order($order_id);
         $master_order = wc_get_order($master_order_id);
         
@@ -513,165 +512,100 @@ class MasterOrderManager
             return false;
         }
 
-        // Verificar estado antes del lock
+        // NUEVA PROTECCIÓN: Verificar que el pedido esté en estado 'processing' o 'reviewed'
         $current_status = $order->get_status();
         $allowed_statuses = ['processing', 'reviewed'];
         
         if (!in_array($current_status, $allowed_statuses)) {
+       
             return false;
         }
 
-        // VERIFICACIÓN RÁPIDA: Si ya está procesado, salir ANTES del lock
-        $existing_master = $order->get_meta('_master_order_id');
-        if ($existing_master && $existing_master == $master_order_id) {
-            // Ya procesado anteriormente, no necesita lock ni log
-            return true;
-        }
-
-        // Verificar también en la lista de incluidos (verificación rápida)
+        // PROTECCIÓN CRÍTICA: Verificar si el pedido ya fue procesado ANTES de agregar items
         $included_orders = $master_order->get_meta('_included_orders') ?: [];
         if (in_array($order_id, $included_orders)) {
-            // Ya está en la lista, no necesita lock
-            return true;
+            return true; // Ya procesado, no es un error
         }
 
-        // AHORA SÍ: Adquirir lock solo si realmente necesitamos procesar
-        $lock_name = "add_order_{$order_id}_to_master_{$master_order_id}";
-        $lock_timeout = 30;
-        
-        global $wpdb;
-        $lock_result = $wpdb->get_var($wpdb->prepare("SELECT GET_LOCK(%s, %d)", $lock_name, $lock_timeout));
-        
-        if ($lock_result != 1) {
-            error_log("MasterOrderManager: Could not acquire lock for adding order {$order_id} to master {$master_order_id}");
-            return false;
+        // PROTECCIÓN ADICIONAL: Verificar meta del pedido individual
+        $existing_master = $order->get_meta('_master_order_id');
+        if ($existing_master && $existing_master == $master_order_id) {
+            return true; // Ya procesado, no es un error
         }
 
-        try {
-            // RE-VERIFICAR después del lock (por si cambió mientras esperábamos)
-            $order = wc_get_order($order_id);
-            $master_order = wc_get_order($master_order_id);
+        // Marcar pedido como procesado PRIMERO
+        $order->update_meta_data('_master_order_id', $master_order_id);
+        $order->update_meta_data('_added_to_master_at', current_time('mysql'));
+        $order->save();
+
+        // Agregar items al pedido maestro con combinación de cantidades
+        $items_added = 0;
+        $items_updated = 0;
+        
+        foreach ($order->get_items() as $item) {
+            // Verificar que es un item de producto
+            if (!is_a($item, 'WC_Order_Item_Product')) {
+                continue;
+            }
             
-            if (!$order || !$master_order) {
-                return false;
-            }
-
-            // Re-verificar estado
-            $current_status = $order->get_status();
-            if (!in_array($current_status, $allowed_statuses)) {
-                return false;
-            }
-
-            // PROTECCIÓN CRÍTICA: Re-verificar duplicados dentro del lock
-            // 1. Verificar en meta de master order
-            $included_orders = $master_order->get_meta('_included_orders') ?: [];
-            if (in_array($order_id, $included_orders)) {
-                // Detectado después del lock, alguien lo añadió mientras esperábamos
-                return true;
-            }
-
-            // 2. Verificar meta del pedido individual
-            $existing_master = $order->get_meta('_master_order_id');
-            if ($existing_master && $existing_master == $master_order_id) {
-                error_log("MasterOrderManager: Order {$order_id} already has master_order_id {$master_order_id}");
-                return true; // Ya procesado, no es un error
-            }
-
-            // 3. Verificación adicional: comprobar si el pedido ya está en CUALQUIER master order
-            if ($existing_master && $existing_master != $master_order_id) {
-                error_log("MasterOrderManager: Order {$order_id} already belongs to different master order {$existing_master}");
-                return false; // Ya pertenece a otra master order
-            }
-
-            // Marcar pedido como procesado PRIMERO (con verificación adicional)
-            $order->update_meta_data('_master_order_id', $master_order_id);
-            $order->update_meta_data('_added_to_master_at', current_time('mysql'));
-            $order->save();
-
-            // VERIFICACIÓN POST-SAVE: Asegurar que los datos se guardaron correctamente
-            $order = wc_get_order($order_id); // Re-leer la orden para verificar cambios
-            $saved_master_id = $order->get_meta('_master_order_id');
+            $product_id = $item->get_product_id();
+            $variation_id = $item->get_variation_id();
+            $quantity = $item->get_quantity();
+            $subtotal = $item->get_subtotal();
+            $total = $item->get_total();
             
-            if ($saved_master_id != $master_order_id) {
-                error_log("MasterOrderManager: Failed to save master_order_id for order {$order_id}");
-                return false;
-            }
-
-            // Agregar items al pedido maestro con combinación de cantidades
-            $items_added = 0;
-            $items_updated = 0;
+            // Buscar si el producto ya existe en el pedido maestro
+            $existing_item = $this->findExistingItem($master_order, $product_id, $variation_id);
             
-            foreach ($order->get_items() as $item) {
-                // Verificar que es un item de producto
-                if (!is_a($item, 'WC_Order_Item_Product')) {
-                    continue;
-                }
+            if ($existing_item) {
+                // El producto ya existe, combinar cantidades
+                $new_quantity = $existing_item->get_quantity() + $quantity;
+                $new_subtotal = $existing_item->get_subtotal() + $subtotal;
+                $new_total = $existing_item->get_total() + $total;
                 
-                $product_id = $item->get_product_id();
-                $variation_id = $item->get_variation_id();
-                $quantity = $item->get_quantity();
-                $subtotal = $item->get_subtotal();
-                $total = $item->get_total();
+                $existing_item->set_quantity($new_quantity);
+                $existing_item->set_subtotal($new_subtotal);
+                $existing_item->set_total($new_total);
+                $existing_item->save();
                 
-                // Buscar si el producto ya existe en el pedido maestro
-                $existing_item = $this->findExistingItem($master_order, $product_id, $variation_id);
-                
-                if ($existing_item) {
-                    // El producto ya existe, combinar cantidades
-                    $new_quantity = $existing_item->get_quantity() + $quantity;
-                    $new_subtotal = $existing_item->get_subtotal() + $subtotal;
-                    $new_total = $existing_item->get_total() + $total;
-                    
-                    $existing_item->set_quantity($new_quantity);
-                    $existing_item->set_subtotal($new_subtotal);
-                    $existing_item->set_total($new_total);
-                    $existing_item->save();
-                    
-                    $items_updated++;
-                } else {
-                    // Producto nuevo, agregarlo normalmente
-                    $master_order->add_product(
-                        wc_get_product($product_id),
-                        $quantity,
-                        [
-                            'variation' => $variation_id ? wc_get_product($variation_id) : null,
-                            'totals' => [
-                                'subtotal' => $subtotal,
-                                'total' => $total,
-                            ]
+                $items_updated++;
+            } else {
+                // Producto nuevo, agregarlo normalmente
+                $master_order->add_product(
+                    wc_get_product($product_id),
+                    $quantity,
+                    [
+                        'variation' => $variation_id ? wc_get_product($variation_id) : null,
+                        'totals' => [
+                            'subtotal' => $subtotal,
+                            'total' => $total,
                         ]
-                    );
-                    $items_added++;
-                }
+                    ]
+                );
+                $items_added++;
             }
-
-            // Recalcular totales
-            $master_order->calculate_totals();
-            
-            // NUEVO: Ordenar productos por ID para mantener orden consistente
-            $this->sortMasterOrderItemsByProductId($master_order);
-
-            // Actualizar lista de pedidos incluidos DESPUÉS de agregar items exitosamente
-            $included_orders[] = $order_id;
-            $master_order->update_meta_data('_included_orders', $included_orders);
-            
-            // Añadir nota al pedido maestro sobre el pedido hijo agregado
-            $note_message = sprintf(
-                __('Child order id #%d added to master order. Items added: %d, Items updated: %d', 'neve-child'),
-                $order_id,
-                $items_added,
-                $items_updated
-            );
-            
-            $master_order->add_order_note($note_message);
-            $master_order->save();
-
-            return true;
-
-        } finally {
-            // SIEMPRE liberar el lock
-            $wpdb->get_var($wpdb->prepare("SELECT RELEASE_LOCK(%s)", $lock_name));
         }
+
+        // Recalcular totales
+        $master_order->calculate_totals();
+        
+        // NUEVO: Ordenar productos por ID para mantener orden consistente
+        $this->sortMasterOrderItemsByProductId($master_order);
+
+        // Actualizar lista de pedidos incluidos DESPUÉS de agregar items exitosamente
+        $included_orders[] = $order_id;
+        $master_order->update_meta_data('_included_orders', $included_orders);
+        
+        // Añadir nota al pedido maestro sobre el pedido hijo agregado
+        $note_message = sprintf(
+            __('Child order id #%d added to master order.', 'neve-child'),
+            $order_id
+        );
+        
+        $master_order->add_order_note($note_message);
+        $master_order->save();
+
+        return true;
     }
 
     /**
@@ -1179,62 +1113,6 @@ class MasterOrderManager
                 }
             }
 
-            // VALIDACIÓN FINAL: Después de procesar todos los pedidos
-            // Recopilar IDs únicos de master orders afectadas
-            $affected_master_orders = [];
-            foreach ($post_ids as $post_id) {
-                if ($this->isMasterOrder($post_id)) {
-                    $affected_master_orders[$post_id] = true;
-                }
-            }
-
-            // Validar cada master order afectada
-            $validation_failures = [];
-            foreach (array_keys($affected_master_orders) as $master_order_id) {
-                $validation_result = $this->validateMasterOrderProductTotals($master_order_id);
-                
-                if (!$validation_result['valid']) {
-                    $validation_failures[] = $validation_result;
-                    
-                    // Añadir nota al pedido maestro sobre el fallo de validación
-                    $master_order = wc_get_order($master_order_id);
-                    if ($master_order) {
-                        $discrepancies_summary = [];
-                        foreach ($validation_result['discrepancies'] as $disc) {
-                            $discrepancies_summary[] = sprintf(
-                                '%s: esperado %d, actual %d (diferencia: %+d)',
-                                $disc['name'],
-                                $disc['expected_qty'],
-                                $disc['actual_qty'],
-                                $disc['difference']
-                            );
-                        }
-                        
-                        $master_order->add_order_note(sprintf(
-                            __('⚠️ VALIDATION FAILED after bulk action: %s. Discrepancies: %s', 'neve-child'),
-                            $validation_result['summary'],
-                            implode('; ', $discrepancies_summary)
-                        ));
-                    }
-                }
-            }
-
-            // Mostrar notificación si hubo fallos de validación
-            if (!empty($validation_failures)) {
-                set_transient('master_order_validation_error', [
-                    'type' => 'error',
-                    'message' => sprintf(
-                        _n(
-                            '%d master order failed product validation. Check order notes for details.',
-                            '%d master orders failed product validation. Check order notes for details.',
-                            count($validation_failures),
-                            'neve-child'
-                        ),
-                        count($validation_failures)
-                    )
-                ], 30);
-            }
-
             // Add admin notices
             if ($changed > 0) {
                 set_transient('master_order_bulk_notice', [
@@ -1267,39 +1145,6 @@ class MasterOrderManager
      */
     public function showBulkActionNotices(): void
     {
-        // Notificación de éxito
-        $success_notice = get_transient('master_order_bulk_notice');
-        if ($success_notice) {
-            printf(
-                '<div class="notice notice-%s is-dismissible"><p>%s</p></div>',
-                esc_attr($success_notice['type']),
-                esc_html($success_notice['message'])
-            );
-            delete_transient('master_order_bulk_notice');
-        }
-
-        // Notificación de advertencia
-        $warning_notice = get_transient('master_order_bulk_warning');
-        if ($warning_notice) {
-            printf(
-                '<div class="notice notice-%s is-dismissible"><p>%s</p></div>',
-                esc_attr($warning_notice['type']),
-                esc_html($warning_notice['message'])
-            );
-            delete_transient('master_order_bulk_warning');
-        }
-
-        // Notificación de error de validación
-        $validation_error = get_transient('master_order_validation_error');
-        if ($validation_error) {
-            printf(
-                '<div class="notice notice-%s is-dismissible"><p><strong>⚠️ Validation Error:</strong> %s</p></div>',
-                esc_attr($validation_error['type']),
-                esc_html($validation_error['message'])
-            );
-            delete_transient('master_order_validation_error');
-        }
-
         if (!empty($_REQUEST['bulk_master_orders_completed'])) {
             $completed = intval($_REQUEST['bulk_master_orders_completed']);
             $errors = intval($_REQUEST['bulk_master_orders_errors'] ?? 0);
@@ -2162,165 +2007,6 @@ class MasterOrderManager
             'active_master_orders' => (int) $active_masters,
             'timestamp' => current_time('mysql')
         ];
-    }
-
-    /**
-     * Validar que los productos totales de una master order coincidan con sus hijos
-     * 
-     * Esta función compara los productos y cantidades de una master order con la suma
-     * de todos sus pedidos hijos (_included_orders). Detecta discrepancias que pueden
-     * indicar duplicados o problemas en la agregación.
-     * 
-     * PROTECCIÓN: Usa MySQL lock para garantizar lectura consistente de datos
-     * 
-     * @param int $master_order_id ID de la master order a validar
-     * @return array Resultado de validación con estado y detalles
-     */
-    private function validateMasterOrderProductTotals(int $master_order_id): array
-    {
-        // PROTECCIÓN: Lock MySQL para lectura consistente
-        $lock_name = "validate_master_order_{$master_order_id}";
-        $lock_timeout = 10; // 10 segundos - solo lectura, debería ser rápido
-        
-        global $wpdb;
-        $lock_result = $wpdb->get_var($wpdb->prepare("SELECT GET_LOCK(%s, %d)", $lock_name, $lock_timeout));
-        
-        if ($lock_result != 1) {
-            error_log("MasterOrderManager: Could not acquire validation lock for master order {$master_order_id}");
-            return [
-                'valid' => false,
-                'error' => 'Could not acquire validation lock',
-                'master_order_id' => $master_order_id
-            ];
-        }
-
-        try {
-            $master_order = wc_get_order($master_order_id);
-            
-            if (!$master_order) {
-                return [
-                    'valid' => false,
-                    'error' => 'Master order not found',
-                    'master_order_id' => $master_order_id
-                ];
-            }
-
-            // Obtener lista de pedidos incluidos
-            $included_orders = $master_order->get_meta('_included_orders') ?: [];
-            
-            if (empty($included_orders)) {
-                return [
-                    'valid' => true,
-                    'message' => 'No child orders yet',
-                    'master_order_id' => $master_order_id
-                ];
-            }
-
-        // Calcular suma de productos de todos los pedidos hijos
-        $child_products_sum = [];
-        
-        foreach ($included_orders as $child_order_id) {
-            $child_order = wc_get_order($child_order_id);
-            if (!$child_order) {
-                continue;
-            }
-
-            foreach ($child_order->get_items() as $item) {
-                if (!is_a($item, 'WC_Order_Item_Product')) {
-                    continue;
-                }
-
-                $product_id = $item->get_product_id();
-                $variation_id = $item->get_variation_id();
-                $key = $variation_id ? "product_{$product_id}_var_{$variation_id}" : "product_{$product_id}";
-
-                if (!isset($child_products_sum[$key])) {
-                    $child_products_sum[$key] = [
-                        'product_id' => $product_id,
-                        'variation_id' => $variation_id,
-                        'quantity' => 0,
-                        'name' => $item->get_name()
-                    ];
-                }
-
-                $child_products_sum[$key]['quantity'] += $item->get_quantity();
-            }
-        }
-
-        // Obtener productos de la master order
-        $master_products = [];
-        foreach ($master_order->get_items() as $item) {
-            if (!is_a($item, 'WC_Order_Item_Product')) {
-                continue;
-            }
-
-            $product_id = $item->get_product_id();
-            $variation_id = $item->get_variation_id();
-            $key = $variation_id ? "product_{$product_id}_var_{$variation_id}" : "product_{$product_id}";
-
-            $master_products[$key] = [
-                'product_id' => $product_id,
-                'variation_id' => $variation_id,
-                'quantity' => $item->get_quantity(),
-                'name' => $item->get_name()
-            ];
-        }
-
-        // Comparar productos
-        $discrepancies = [];
-        $all_product_keys = array_unique(array_merge(
-            array_keys($child_products_sum),
-            array_keys($master_products)
-        ));
-
-        foreach ($all_product_keys as $key) {
-            $child_qty = $child_products_sum[$key]['quantity'] ?? 0;
-            $master_qty = $master_products[$key]['quantity'] ?? 0;
-
-            if ($child_qty != $master_qty) {
-                $discrepancies[] = [
-                    'product_key' => $key,
-                    'product_id' => $child_products_sum[$key]['product_id'] ?? $master_products[$key]['product_id'],
-                    'variation_id' => $child_products_sum[$key]['variation_id'] ?? $master_products[$key]['variation_id'],
-                    'name' => $child_products_sum[$key]['name'] ?? $master_products[$key]['name'],
-                    'expected_qty' => $child_qty,
-                    'actual_qty' => $master_qty,
-                    'difference' => $master_qty - $child_qty
-                ];
-            }
-        }
-
-        if (!empty($discrepancies)) {
-            // Log de error con detalles
-            error_log(sprintf(
-                "MasterOrderManager: VALIDATION FAILED for master order #%d. Discrepancies found: %s",
-                $master_order_id,
-                json_encode($discrepancies)
-            ));
-
-            return [
-                'valid' => false,
-                'master_order_id' => $master_order_id,
-                'child_orders_count' => count($included_orders),
-                'discrepancies' => $discrepancies,
-                'summary' => sprintf(
-                    '%d product(s) with quantity mismatches',
-                    count($discrepancies)
-                )
-            ];
-        }
-
-        return [
-            'valid' => true,
-            'master_order_id' => $master_order_id,
-            'child_orders_count' => count($included_orders),
-            'products_validated' => count($all_product_keys)
-        ];
-
-        } finally {
-            // SIEMPRE liberar el lock
-            $wpdb->get_var($wpdb->prepare("SELECT RELEASE_LOCK(%s)", $lock_name));
-        }
     }
 }
 

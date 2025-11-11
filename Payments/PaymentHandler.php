@@ -58,7 +58,7 @@ class PaymentHandler
     /**
      * Total mínimo del carrito para transferencia bancaria
      */
-    private const MIN_BANK_TRANSFER_AMOUNT = 1000.0;
+    private const MIN_BANK_TRANSFER_AMOUNT = 100.0;
 
     /**
      * Si bloquear completamente el checkout cuando hay pedidos pendientes

@@ -98,9 +98,9 @@ class OrderManagerRoleManager
     {
         // FORZAR RECREACIÓN DEL ROL (igual que teacher)
         // Primero eliminamos el rol si existe para forzar actualización
-        if (get_role('order_manager')) {
-            remove_role('order_manager');
-        }
+        // if (get_role('order_manager')) {
+        //     remove_role('order_manager');
+        // }
 
         // Crear el rol order_manager con capacidades IDÉNTICAS a teacher
         add_role(

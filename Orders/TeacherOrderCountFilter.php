@@ -164,17 +164,15 @@ class TeacherOrderCountFilter
         $valid_statuses = $this->getValidOrderStatuses();
         $status_placeholders = implode(',', array_fill(0, count($valid_statuses), '%s'));
 
-        // Consulta para "todos" - solo estados válidos y EXCLUYENDO master orders
+        // Consulta para "todos" - solo estados válidos
         $total_query = "
             SELECT COUNT(*) 
             FROM {$wpdb->prefix}wc_orders o
             INNER JOIN {$wpdb->prefix}wc_orders_meta om ON o.id = om.order_id
-            LEFT JOIN {$wpdb->prefix}wc_orders_meta om_master ON o.id = om_master.order_id AND om_master.meta_key = '_is_master_order'
             WHERE om.meta_key = '_school_id' 
             AND om.meta_value = %s
             AND o.type = 'shop_order'
             AND o.status IN ($status_placeholders)
-            AND (om_master.meta_value IS NULL OR om_master.meta_value != 'yes')
         ";
         
         $prepared_query = $wpdb->prepare($total_query, array_merge([$school_id], $valid_statuses));
@@ -189,11 +187,9 @@ class TeacherOrderCountFilter
                 COUNT(*) as count
             FROM {$wpdb->prefix}wc_orders o
             INNER JOIN {$wpdb->prefix}wc_orders_meta om ON o.id = om.order_id
-            LEFT JOIN {$wpdb->prefix}wc_orders_meta om_master ON o.id = om_master.order_id AND om_master.meta_key = '_is_master_order'
             WHERE om.meta_key = '_school_id' 
             AND om.meta_value = %s
             AND o.type = 'shop_order'
-            AND (om_master.meta_value IS NULL OR om_master.meta_value != 'yes')
             GROUP BY 
                 CASE 
                     WHEN o.status = 'trash' THEN 'trash'
@@ -223,17 +219,15 @@ class TeacherOrderCountFilter
         $valid_statuses = $this->getValidOrderStatuses();
         $status_placeholders = implode(',', array_fill(0, count($valid_statuses), '%s'));
 
-        // Consulta para "todos" - solo estados válidos y EXCLUYENDO master orders
+        // Consulta para "todos" - solo estados válidos
         $total_query = "
             SELECT COUNT(*) 
             FROM {$wpdb->posts} p
             INNER JOIN {$wpdb->postmeta} pm ON p.ID = pm.post_id
-            LEFT JOIN {$wpdb->postmeta} pm_master ON p.ID = pm_master.post_id AND pm_master.meta_key = '_is_master_order'
             WHERE p.post_type = 'shop_order'
             AND pm.meta_key = '_school_id' 
             AND pm.meta_value = %s
             AND p.post_status IN ($status_placeholders)
-            AND (pm_master.meta_value IS NULL OR pm_master.meta_value != 'yes')
         ";
         
         $prepared_query = $wpdb->prepare($total_query, array_merge([$school_id], $valid_statuses));
@@ -248,11 +242,9 @@ class TeacherOrderCountFilter
                 COUNT(*) as count
             FROM {$wpdb->posts} p
             INNER JOIN {$wpdb->postmeta} pm ON p.ID = pm.post_id
-            LEFT JOIN {$wpdb->postmeta} pm_master ON p.ID = pm_master.post_id AND pm_master.meta_key = '_is_master_order'
             WHERE p.post_type = 'shop_order'
             AND pm.meta_key = '_school_id' 
             AND pm.meta_value = %s
-            AND (pm_master.meta_value IS NULL OR pm_master.meta_value != 'yes')
             GROUP BY 
                 CASE 
                     WHEN p.post_status = 'trash' THEN 'trash'

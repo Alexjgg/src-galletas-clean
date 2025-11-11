@@ -283,90 +283,6 @@ class UserAdminColumnsManager
     }
 
     /**
-     * Handle total sales sorting with HPOS compatibility
-     * Usa la misma lógica SQL que woocommerce-users.php
-     * 
-     * @param \WP_User_Query $query User query
-     */
-    private function handleTotalSalesSorting(\WP_User_Query $query): void
-    {
-        global $wpdb;
-        
-        $order = $query->get('order');
-        $order_direction = ($order === 'ASC') ? 'ASC' : 'DESC';
-        
-        // Detectar si HPOS está activo
-        $hpos_enabled = class_exists('\Automattic\WooCommerce\Utilities\FeaturesUtil') &&
-                       \Automattic\WooCommerce\Utilities\FeaturesUtil::feature_is_enabled('custom_order_tables');
-        
-        if ($hpos_enabled) {
-            // Consulta HPOS (nueva arquitectura de WooCommerce)
-            $sql_query = "
-                SELECT u.ID as user_id, 
-                       COALESCE(SUM(CASE WHEN o.status NOT IN ('wc-cancelled', 'wc-failed', 'wc-pending') 
-                                        THEN CAST(o.total_amount AS DECIMAL(10,2)) 
-                                        ELSE 0 END), 0) AS total_spent
-                FROM {$wpdb->users} u
-                LEFT JOIN {$wpdb->prefix}wc_orders o ON u.ID = o.customer_id
-                GROUP BY u.ID 
-                ORDER BY total_spent {$order_direction}
-            ";
-        } else {
-            // Consulta Legacy (arquitectura tradicional con posts)
-            $sql_query = "
-                SELECT u.ID as user_id, 
-                       COALESCE(SUM(CASE WHEN p.post_status NOT IN ('wc-cancelled', 'wc-failed', 'wc-pending') 
-                                        THEN CAST(pm_total.meta_value AS DECIMAL(10,2)) 
-                                        ELSE 0 END), 0) AS total_spent
-                FROM {$wpdb->users} u
-                LEFT JOIN {$wpdb->postmeta} pm_customer ON (u.ID = pm_customer.meta_value AND pm_customer.meta_key = '_customer_user')
-                LEFT JOIN {$wpdb->posts} p ON (pm_customer.post_id = p.ID AND p.post_type = 'shop_order')
-                LEFT JOIN {$wpdb->postmeta} pm_total ON (p.ID = pm_total.post_id AND pm_total.meta_key = '_order_total')
-                GROUP BY u.ID 
-                ORDER BY total_spent {$order_direction}
-            ";
-        }
-        
-        // Obtener los IDs de usuario ordenados
-        $sorted_user_ids = $wpdb->get_col($sql_query);
-        
-        // Configurar la consulta de usuarios para usar el orden personalizado
-        $query->set('orderby', 'include');
-        $query->set('include', $sorted_user_ids);
-    }
-
-    /**
-     * Handle incoming sorting with proper NULL handling
-     * Ordena por _user_incoming_total manejando correctamente valores NULL
-     * 
-     * @param \WP_User_Query $query User query
-     */
-    private function handleIncomingSorting(\WP_User_Query $query): void
-    {
-        global $wpdb;
-        
-        $order = $query->get('order');
-        $order_direction = ($order === 'ASC') ? 'ASC' : 'DESC';
-        
-        // Consulta SQL personalizada para ordenar por _user_incoming_total
-        // Usuarios sin el meta_value aparecerán con 0.00 al final/principio según orden
-        $sql_query = "
-            SELECT u.ID as user_id, 
-                   COALESCE(CAST(um.meta_value AS DECIMAL(10,2)), 0) AS incoming_total
-            FROM {$wpdb->users} u
-            LEFT JOIN {$wpdb->usermeta} um ON (u.ID = um.user_id AND um.meta_key = '_user_incoming_total')
-            ORDER BY incoming_total {$order_direction}, u.ID ASC
-        ";
-        
-        // Obtener los IDs de usuario ordenados
-        $sorted_user_ids = $wpdb->get_col($sql_query);
-        
-        // Configurar la consulta de usuarios para usar el orden personalizado
-        $query->set('orderby', 'include');
-        $query->set('include', $sorted_user_ids);
-    }
-
-    /**
      * Make custom columns sortable
      * 
      * @param array $columns Sortable columns
@@ -377,7 +293,6 @@ class UserAdminColumnsManager
         $columns[Constants::COLUMN_REGISTRATION_DATE] = 'registered';
         $columns[Constants::COLUMN_SCHOOL_INFO] = Constants::USER_META_SCHOOL_ID;
         $columns['user_incoming_total'] = '_user_incoming_total';
-        $columns['total_sales'] = 'total_sales'; // Agregar total_sales como ordenable
         
         return $columns;
     }
@@ -407,13 +322,8 @@ class UserAdminColumnsManager
                 break;
                 
             case '_user_incoming_total':
-                // ✅ CORREGIDO: Usar consulta SQL personalizada para ordenación correcta
-                $this->handleIncomingSorting($query);
-                break;
-                
-            case 'total_sales':
-                // Usar la misma lógica SQL personalizada que woocommerce-users.php
-                $this->handleTotalSalesSorting($query);
+                $query->set('meta_key', '_user_incoming_total');
+                $query->set('orderby', 'meta_value_num');
                 break;
         }
     }

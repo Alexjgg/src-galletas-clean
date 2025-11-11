@@ -205,11 +205,17 @@ class PackingSlipCustomizer
         }
 
         $student_name_parts = $this->getStudentNameParts($order);
+        $school_name = $this->getSchoolName($order);
         
-        // Sustituir nombre y apellidos por los del alumno, vaciar el resto
+        // Sustituir nombre y apellidos por los del alumno, añadir nombre del centro
         if ($student_name_parts) {
             $address['first_name'] = $student_name_parts['first_name'];
             $address['last_name'] = $student_name_parts['last_name'];
+        }
+        
+        // Añadir nombre del centro educativo en el campo company
+        if (!empty($school_name)) {
+            $address['company'] = $school_name;
         }
         
         // Vaciar todos los campos de direcciones
@@ -258,11 +264,17 @@ class PackingSlipCustomizer
         }
 
         $student_name_parts = $this->getStudentNameParts($order);
+        $school_name = $this->getSchoolName($order);
         
-        // Sustituir nombre y apellidos por los del alumno, vaciar el resto
+        // Sustituir nombre y apellidos por los del alumno, añadir nombre del centro
         if ($student_name_parts) {
             $address['first_name'] = $student_name_parts['first_name'];
             $address['last_name'] = $student_name_parts['last_name'];
+        }
+        
+        // Añadir nombre del centro educativo en el campo company
+        if (!empty($school_name)) {
+            $address['company'] = $school_name;
         }
         
         // Vaciar todos los campos de direcciones

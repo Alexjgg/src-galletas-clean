@@ -93,8 +93,10 @@ class CheckoutBlocker
         add_action('woocommerce_thankyou', [$this, 'clearCartAfterPayment']);
         add_action('woocommerce_payment_complete', [$this, 'clearCartAfterPayment']);
         
-        // HOOKS PARA SHORTCODES (carrito clásico) - USANDO SISTEMA NATIVO DE WOOCOMMERCE
-        add_action('woocommerce_before_cart', [$this, 'showUnpaidOrdersNoticeInCart'], 5);
+        // HOOK DEL TEMA NEVE - Inyectar mensaje en el carrito
+        add_action('neve_before_content', [$this, 'showUnpaidOrdersNoticeInCart'], 10);
+        
+        // HOOKS PARA CHECKOUT
         add_action('woocommerce_before_checkout_form', [$this, 'showUnpaidOrdersNoticeInCheckout'], 5);
         
         // Hook para limpiar noticias viejas
@@ -134,12 +136,18 @@ class CheckoutBlocker
     }
 
     /**
-     * MÉTODO MEJORADO: Mostrar notice en el carrito usando WooCommerce nativo
+     * MÉTODO MEJORADO: Mostrar notice en el carrito usando hook de Neve
+     * Inyecta el mensaje simple directamente en el HTML antes del contenido
      * 
      * @return void
      */
     public function showUnpaidOrdersNoticeInCart(): void
     {
+        // CRÍTICO: Solo ejecutar en la página del carrito
+        if (!function_exists('is_cart') || !is_cart()) {
+            return;
+        }
+        
         static $already_executed = false;
         
         // Evitar ejecución múltiple
@@ -148,11 +156,6 @@ class CheckoutBlocker
         }
         
         $already_executed = true;
-        
-        // Verificar que WooCommerce está disponible
-        if (!function_exists('wc_add_notice')) {
-            return;
-        }
         
         if (!is_user_logged_in()) {
             return;
@@ -168,8 +171,20 @@ class CheckoutBlocker
                 count($unpaid_completed_orders) === 1 ? __('your completed order', 'neve-child') : __('your completed orders', 'neve-child')
             );
 
-            // Usar wc_add_notice() para que el tema maneje el styling nativo
-            wc_add_notice($message, 'notice');
+            // Imprimir el mensaje directamente en HTML con colores del tema Neve
+            echo '<div class="woocommerce-notices-wrapper" style="margin-bottom: 20px;">';
+            echo '<div class="woocommerce-info" role="alert" style="
+                padding: 1.2em 1.5em 1.2em 3em;
+                margin-bottom: 20px;
+                border-left: 4px solid var(--nv-primary-accent);
+          
+                color: var(--nv-text-color);
+                border-radius: 4px;
+                box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+            ">';
+            echo esc_html($message);
+            echo '</div>';
+            echo '</div>';
         }
     }
 
